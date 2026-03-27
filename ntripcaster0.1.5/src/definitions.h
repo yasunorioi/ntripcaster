@@ -38,22 +38,12 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 
-#ifndef __USE_MISC
-# define __USE_MISC
-#endif
-
-#ifndef __USE_GNU
-# define __USE_GNU
-#endif
-
-#ifndef __USE_BSD
-# define __USE_BSD
-#endif
-
-#ifndef __EXTENSIONS__
-# define __EXTENSIONS__
-#endif
-
+/* Request POSIX + GNU extensions.  _GNU_SOURCE is the portable way to do
+ * this; it works on glibc, musl (where it is a no-op, but harmless), and
+ * most other POSIX libc implementations.  The internal glibc feature macros
+ * (__USE_MISC, __USE_GNU, __USE_BSD) must NOT be set manually — they are
+ * side-effects of _GNU_SOURCE on glibc and are undefined on musl, causing
+ * no harm but also no benefit when defined by user code. */
 #ifndef _GNU_SOURCE
 # define _GNU_SOURCE
 #endif

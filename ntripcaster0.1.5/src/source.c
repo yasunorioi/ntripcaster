@@ -368,10 +368,11 @@ find_mount_with_req (request_t *req)
 	connection_t *con;
 //	request_t search;
 
-	int true = 0;
+	/* Renamed from 'true' to 'found': 'true' clashes with <stdbool.h> on musl */
+	int found = 0;
 
 	avl_traverser trav = {0};
-	
+
 	if (!req || !req->path || !req->host)
 	{
 		write_log (LOG_DEFAULT, "WARNING: find_mount_with_req called with NULL request!");
@@ -379,11 +380,11 @@ find_mount_with_req (request_t *req)
 	}
 
 	xa_debug (1, "DEBUG: Looking for [%s] on host [%s] on port %d", req->path, req->host, req->port);
-	
 
-	while ((con = avl_traverse(info.sources, &trav)) != NULL) 
+
+	while ((con = avl_traverse(info.sources, &trav)) != NULL)
 	{
-		true = 0;
+		found = 0;
 
 		xa_debug(2, "DEBUG: Looking on mount [%s]", con->food.source->audiocast.mount);
 
@@ -397,36 +398,36 @@ find_mount_with_req (request_t *req)
 			(	(ice_strcmp(search.path, req->path) == 0) ||
 				(ice_strcmp(tempbuf, req->path) == 0))
 			) {
-				true = 1;
+				found = 1;
 		} else if (con->food.source->audiocast.mount[0] == '/') {
 			if 	((hostname_local(req->host) &&
 				((ice_strcmp(con->food.source->audiocast.mount, req->path) == 0) ||
 					(ice_strcmp(tempbuf, req->path) == 0)))
 				)
-					true = 1;
+					found = 1;
 		} else {
 			if (	(hostname_local(req->host) &&
 				((ice_strcmp(con->food.source->audiocast.mount, req->path + 1) == 0) ||
 				(ice_strcmp(tempbuf, req->path + 1) == 0)))
 				)
-					true = 1;
+					found = 1;
 		}
 */
 
 		if (con->food.source->audiocast.mount[0] == '/') {
 			if (	(ice_strcmp(con->food.source->audiocast.mount, req->path) == 0) ||
 				(ice_strcmp(tempbuf, req->path) == 0)
-			) true = 1;
+			) found = 1;
 		} else {
 			if (	(ice_strcmp(con->food.source->audiocast.mount, req->path + 1) == 0) ||
 				(ice_strcmp(tempbuf, req->path + 1) == 0)
-			) true = 1;
+			) found = 1;
 		}
 
-		if (true) {
+		if (found) {
 			xa_debug(1, "DEBUG: Found local mount for [%s]", req->path);
 			return con;
-		} 
+		}
 	}
 	return NULL;
 }

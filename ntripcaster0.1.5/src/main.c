@@ -106,8 +106,10 @@ int running = 0;
 #endif
 
 
-/* for perror and for various sanity checks */
-extern int errno;
+/* errno is provided by <errno.h> (already included via definitions.h chain).
+ * Do NOT re-declare it as "extern int errno" — on musl libc errno is a
+ * thread-local macro (*__errno_location()), and an extern declaration
+ * causes a conflicting-types compile error. */
 
 /* Importing a tree and mutex from sock.c */
 extern avl_tree *sock_sockets;
