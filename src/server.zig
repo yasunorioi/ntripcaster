@@ -19,6 +19,8 @@ pub const Source = struct {
     ring: relay.RingBuffer,
     /// false になるとクライアントループが終了する
     active: std.atomic.Value(bool),
+    /// 現在接続中のクライアント数。destroy() はゼロになるまで待機する
+    client_count: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
 
     pub fn create(alloc: std.mem.Allocator, mount: []const u8) !*Source {
@@ -27,6 +29,7 @@ pub const Source = struct {
             .mount = try alloc.dupe(u8, mount),
             .ring = .{},
             .active = std.atomic.Value(bool).init(true),
+            .client_count = std.atomic.Value(u32).init(0),
             .alloc = alloc,
         };
         return s;

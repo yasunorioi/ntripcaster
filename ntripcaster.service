@@ -1,0 +1,36 @@
+[Unit]
+Description=NTRIP Caster - GNSS real-time data streaming server (Zig)
+Documentation=https://github.com/yasunorioi/ntripcaster
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Dedicated unprivileged user (create with: useradd -r -s /sbin/nologin ntripcaster)
+User=ntripcaster
+Group=ntripcaster
+
+# Optional environment file for overrides
+EnvironmentFile=-/etc/ntripcaster/ntripcaster.env
+
+# Zig binary; -c points to config file
+ExecStart=/usr/local/ntripcaster/bin/ntripcaster -c /usr/local/ntripcaster/conf/ntripcaster.conf
+
+# Restart on any non-clean exit; give systemd 5 s before retry
+Restart=on-failure
+RestartSec=5s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ntripcaster
+
+# Harden: restrict writable paths
+ReadWritePaths=/usr/local/ntripcaster/logs
+ReadOnlyPaths=/usr/local/ntripcaster/conf
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

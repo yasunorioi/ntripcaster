@@ -71,6 +71,9 @@ pub fn handleClient(
 /// リングバッファからデータを読み取ってクライアントに送信するループ。
 /// ソース切断 / バッファオーバーラン / 送信エラーで終了する。
 fn clientLoop(stream: std.net.Stream, src: *server.Source) void {
+    _ = src.client_count.fetchAdd(1, .seq_cst);
+    defer _ = src.client_count.fetchSub(1, .seq_cst);
+
     var read_pos = src.ring.currentWritePos();
     var buf: [relay.RingBuffer.CHUNK_SIZE]u8 = undefined;
 
