@@ -8,4 +8,7 @@ const std = @import("std");
 test {
     _ = @import("test_config.zig");
     _ = @import("test_auth.zig");
+    _ = @import("test_protocol.zig");
+    _ = @import("test_sourcetable.zig");
+    _ = @import("test_relay.zig");
 }

@@ -4,3 +4,7 @@
 
 pub const config = @import("config/parser.zig");
 pub const auth = @import("auth/basic.zig");
+pub const ntrip_protocol = @import("ntrip/protocol.zig");
+pub const sourcetable = @import("ntrip/sourcetable.zig");
+pub const relay = @import("relay/engine.zig");
+pub const log_mod = @import("log.zig");
