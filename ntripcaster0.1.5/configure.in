@@ -38,6 +38,14 @@ AC_SUBST(NTRIPCASTER_BINDIR)
 AC_SUBST(NTRIPCASTER_ETCDIR_INST)
 AC_SUBST(NTRIPCASTER_LOGDIR_INST)
 
+dnl systemd unit directory (can be overridden: --with-systemdunitdir=DIR)
+AC_ARG_WITH([systemdunitdir],
+  [AS_HELP_STRING([--with-systemdunitdir=DIR],
+    [directory for systemd unit files @<:@PREFIX/lib/systemd/system@:>@])],
+  [SYSTEMD_UNIT_DIR="$withval"],
+  [SYSTEMD_UNIT_DIR="${prefix}/lib/systemd/system"])
+AC_SUBST([SYSTEMD_UNIT_DIR])
+
 AC_DEFINE_UNQUOTED([NTRIPCASTER_ETCDIR], ["$NTRIPCASTER_ETCDIR"],
   [Relative path from install prefix to config directory])
 AC_SUBST(NTRIPCASTER_ETCDIR)
