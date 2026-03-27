@@ -1,0 +1,88 @@
+##############################################################################
+# NtripCaster configuration file — annotated example
+#
+# Copy this file to ntripcaster.conf and edit to suit your installation.
+# Default install path: /usr/local/ntripcaster/conf/ntripcaster.conf
+#
+# Lines beginning with '#' are comments and are ignored by the server.
+# Blank lines are also ignored.
+##############################################################################
+
+
+############### Server meta information ########################################
+# These values appear in the HTTP server header and NTRIP sourcetable.
+# They have no effect on server behaviour.
+
+# Human-readable location of this caster (city, country, organisation)
+location MyCity
+
+# Contact e-mail for the caster administrator
+rp_email admin@example.com
+
+# Public URL of this caster (used in sourcetable)
+server_url http://caster.example.com
+
+
+########################### Connection limits ##################################
+# Maximum number of simultaneous client connections (NTRIP clients / rovers)
+max_clients 100
+
+# Maximum number of clients allowed per single mountpoint / data source
+max_clients_per_source 100
+
+# Maximum number of simultaneous source connections (NTRIP servers / base stations)
+max_sources 40
+
+
+######################### Authentication #######################################
+# Password that NTRIP sources (base stations / NtripServers) must supply
+# when connecting to push data to a mountpoint.
+# Change this from the default before deploying!
+encoder_password sesam01
+
+
+#################### Network configuration ####################################
+# Hostname of this server.  Must be a resolvable DNS name — NOT an IP address.
+# The server will reject connections it cannot resolve back to this name.
+# Set to "dynamic" to auto-detect the local IP address.
+server_name caster.example.com
+
+# Port(s) to listen on.  2101 is the IANA-assigned NTRIP port.
+# Multiple port lines can be added (up to 5 ports).
+port 2101
+#port 80
+
+
+######################## Log file ##############################################
+# Directory where the log file is written.
+# Must be writable by the ntripcaster user.
+# Default (configured at build time): /usr/local/ntripcaster/logs
+logdir /usr/local/ntripcaster/logs
+
+# Name of the log file (relative to logdir)
+logfile ntripcaster.log
+
+
+############################ Mountpoint access control ########################
+# Controls which NTRIP clients may access which mountpoints.
+# Comment out or remove these lines to allow anonymous (open) access.
+#
+# Syntax:
+#   /MOUNTPOINT
+#     Open access — no password required for clients.
+#
+#   /MOUNTPOINT:user1:pass1,user2:pass2
+#     Password-protected — only listed users can access this mountpoint.
+#
+# The mountpoint name must match the one announced in sourcetable.dat.
+#
+# Examples:
+#   /RTCM32_MSM    — open RTK correction stream (殿方針: RTK data should be open)
+#   /PRIVATE:rover1:secret1,rover2:secret2
+
+# Open mountpoints (no authentication required — recommended for RTK corrections)
+/RTCM32_MSM
+/RTCM31_MSM
+
+# Password-protected mountpoints (optional)
+#/PRIVATE:rover1:secret1

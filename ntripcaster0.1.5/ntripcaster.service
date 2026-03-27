@@ -1,19 +1,39 @@
 [Unit]
-
-Description=NTRIP Caster Service
-
-After=network.target
-
+Description=NTRIP Caster - GNSS real-time data streaming server
+Documentation=https://github.com/yasunorioi/ntripcaster
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-
 Type=simple
 
-ExecStart=/home/ec2-user/ntripcaster/ntripcaster.sh
+# Dedicated unprivileged user (create with: useradd -r -s /sbin/nologin ntripcaster)
+User=ntripcaster
+Group=ntripcaster
 
-Restart=always
+# Optional environment file for overrides (NTRIPCASTER_PORT, etc.)
+# Create /etc/ntripcaster/ntripcaster.env to use this.
+EnvironmentFile=-/etc/ntripcaster/ntripcaster.env
 
+ExecStart=/usr/local/ntripcaster/bin/ntripcaster
+
+# Restart on any non-clean exit; give systemd 5 s before retry
+Restart=on-failure
+RestartSec=5s
+
+# Logging: journal captures stdout/stderr (ntripcaster writes logs to logfile,
+# but stderr goes here during startup failures)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ntripcaster
+
+# Harden: restrict writable paths to log and conf directories only
+ReadWritePaths=/usr/local/ntripcaster/logs
+ReadOnlyPaths=/usr/local/ntripcaster/conf
+
+# Prevent privilege escalation
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
-
 WantedBy=multi-user.target
