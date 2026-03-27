@@ -22,81 +22,141 @@ available that contains or is based on your copy of the Standard
 NtripCaster, you must also make your source code available - at
 least on request.
 
-The Standard NtripCaster software has been tested so far on various
-Suse, Debian, Gentoo, and Redhat (up to Enterprise 5) Linux
-distributions. Note that the software may not run today on some
-other Linux distributions of recent date. Version 0.1.5 of the
-Standard NtripCaster supports a maximum of 50 NtripServers and
-100 NtripClients simultaneously,
-see http://igs.ifag.de/pdf/NtripImplementation.pdf for technical
-details.
- 
-Ntrip Version 1.0 is an RTCM standard for streaming GNSS data over
-the Internet. Offering the Standard NtripCaster Version 0.1.5 is
-part of BKG’s policy to help distributing this standard. RTCM may
-decide to issue further Ntrip versions as the need arises. Thus,
-it might be necessary to modify the Standard NtripCaster
-Version 0.1.5 in the future. Ntrip is already part of some GNSS
-equipment available today. You may like to ask your vendor about
-the Ntrip capability of your GNSS hardware or software.
+This fork (yasunorioi/ntripcaster) adds:
+  - Modern autoconf/automake compatibility (autoreconf -fi)
+  - Correct config path resolution via --prefix (was hardcoded ".")
+  - musl libc compatibility (Alpine Linux / OpenWrt)
+  - systemd service unit with security hardening
+  - Annotated configuration example (ntripcaster.conf.example)
 
-Although Standard NtripCaster Version 0.1.5 should satisfy most
-needs, we continue to work on a high-performance version with
-enhanced functionality. This Professional NtripCaster Version is
-meant for professional/commercial service providers.
 
-Following your installation, we would appreciate if you could
-inform us about the IP address of your Standard NtripCaster. We
-intend to keep track of the upcoming global NtripCaster network,
-which allows linking them through appropriate entries in the
-corresponding configuration files. 
+Build Requirements
+~~~~~~~~~~~~~~~~~~
+  gcc (or clang), make, autoconf >= 2.65, automake >= 1.11
+  musl-dev (Alpine) or glibc-dev (Debian/Ubuntu/CentOS)
 
-Note that the BKG does not give any warranty regarding the
-function of the Standard NtripCaster Version 0.1.5. Moreover,
-the BKG disclaims any liability nor responsibility to any person
-or entity with respect to any loss or damage caused, or alleged
-to be caused, directly or indirectly by the use of Standard
-NtripCaster Version 0.1.5.
+Optional: libwrap (TCP wrappers), libreadline
 
-Please note that due to limited resource we are not able to
-give any support concerning installation and maintanance of the
-software. 
 
-Installation
-~~~~~~~~~~~~
-To install the NtripCaster do the following:
-- unzip the software in a separate directory
-- run "./configure" (if you do not want the server to be installed in
-"/usr/local/ntripcaster" specify the desired path with "./configure --prefix=<path>")
-- run "make"
-- run "make install"
+Build & Install
+~~~~~~~~~~~~~~~
 
-After that, the server files will be in "/usr/local/ntripcaster", binaries will
-be in "/usr/local/ntripcaster/bin", configuration files in
-"/usr/local/ntripcaster/conf", logs in "/usr/local/ntripcaster/logs" and
-templates in "/usr/local/ntripcaster/templates" (or in your desired path
-correspondingly).
+1. Regenerate build system (only needed when cloning from git):
 
-Go to the configuration directory and rename "sourcetable.dat.dist" and
-"ntripcaster.conf.dist" to "sourcetable.dat" and "ntripcaster.conf".
-Edit both files according to your needs. For details about "sourcetable.dat"
-see file "NtripSourcetable.doc". In the configuration file "ntripcaster.conf"
-you have to specify the name of the machine the server is running on
-(no IP adress!!) and you can adapt other settings, like the listening ports,
-the server limits and the access control.
+     cd ntripcaster0.1.5
+     autoreconf -fi
 
-Now the server is ready to be run with "./ntripcaster" in the binary directory.
-The NtripCaster has been tested on various RedHat and Suse Linux distributions.
+2. Configure:
 
-Whatever the content of your "sourcetable.dat" finally might be, it is recommended
-to include the following line in that configuration file:
-CAS;rtcm-ntrip.org;2101;NtripInfoCaster;BKG;0;DEU;50.12;8.69;http://www.rtcm-ntrip.org/home
+     ./configure --prefix=/usr/local/ntripcaster
+
+   Common options:
+     --prefix=DIR           Install root (default: /usr/local/ntripcaster)
+     --sysconfdir=DIR       Config directory (default: PREFIX/conf)
+     --with-systemdunitdir=DIR  systemd unit dir (default: PREFIX/lib/systemd/system)
+
+3. Build:
+
+     make
+
+4. Install (as root):
+
+     sudo make install
+
+   This installs:
+     PREFIX/bin/ntripcaster         — server binary
+     PREFIX/conf/ntripcaster.conf   — config file (created from example if absent)
+     PREFIX/conf/sourcetable.dat    — mountpoint sourcetable (created if absent)
+     PREFIX/conf/ntripcaster.conf.example  — annotated reference copy
+     PREFIX/logs/                   — log directory (created empty)
+     PREFIX/lib/systemd/system/ntripcaster.service  — systemd unit
+
+
+Configuration
+~~~~~~~~~~~~~
+
+Edit the configuration file before starting the server:
+
+     sudo nano /usr/local/ntripcaster/conf/ntripcaster.conf
+
+Key settings to change from defaults:
+
+  server_name   — fully-qualified hostname (e.g. caster.example.com)
+  encoder_password — password for NtripServer (base station) connections
+  port          — listening port (default: 2101, IANA-assigned for NTRIP)
+  logdir        — log file directory
+
+Edit the sourcetable file to list your mountpoints:
+
+     sudo nano /usr/local/ntripcaster/conf/sourcetable.dat
+
+See conf/NtripSourcetable.doc for the sourcetable format specification.
+Include the global NtripInfoCaster entry in your sourcetable:
+
+  CAS;rtcm-ntrip.org;2101;NtripInfoCaster;BKG;0;DEU;50.12;8.69;http://www.rtcm-ntrip.org/home
+
+
+Running with systemd
+~~~~~~~~~~~~~~~~~~~~
+
+1. Create a dedicated unprivileged user:
+
+     sudo useradd -r -s /sbin/nologin ntripcaster
+
+2. Set ownership of install directories:
+
+     sudo chown -R ntripcaster:ntripcaster /usr/local/ntripcaster/logs
+     sudo chown -R ntripcaster:ntripcaster /usr/local/ntripcaster/conf
+
+3. Install the systemd unit (already done by make install, or manually):
+
+     sudo cp ntripcaster0.1.5/ntripcaster.service \
+             /etc/systemd/system/ntripcaster.service
+
+   For system-wide install path (/usr/local/ntripcaster), the unit installed
+   by make install is at PREFIX/lib/systemd/system/ntripcaster.service.
+   Copy it to /etc/systemd/system/ for systemd to recognise it:
+
+     sudo cp /usr/local/ntripcaster/lib/systemd/system/ntripcaster.service \
+             /etc/systemd/system/ntripcaster.service
+
+4. Enable and start:
+
+     sudo systemctl daemon-reload
+     sudo systemctl enable ntripcaster
+     sudo systemctl start ntripcaster
+
+5. Check status and logs:
+
+     systemctl status ntripcaster
+     journalctl -u ntripcaster -f
+
+   The server also writes to PREFIX/logs/ntripcaster.log.
+
+6. Optional: environment overrides via /etc/ntripcaster/ntripcaster.env
+   (EnvironmentFile in the unit file):
+
+     sudo mkdir -p /etc/ntripcaster
+     echo "# Add environment overrides here" | sudo tee /etc/ntripcaster/ntripcaster.env
+
+
+Alpine Linux / musl build
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+This fork is compatible with Alpine Linux and other musl-based systems:
+
+     apk add gcc make musl-dev autoconf automake
+     cd ntripcaster0.1.5
+     autoreconf -fi
+     ./configure --prefix=/usr/local/ntripcaster
+     make
+     sudo make install
 
 
 License
 ~~~~~~~
 NtripCaster, a GNSS real-time data server
-Copyright (C) 2004-2008 
+Copyright (C) 2004-2008 BKG (German Federal Agency for Cartography and Geodesy)
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -115,31 +175,5 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA
 
 Contact and webpage
 ~~~~~~~~~~~~~~~~~~~~
-The main webpage for Ntripcaster is "http://igs.bkg.bund.de/index_ntrip.htm".
-
-27 February 2008, "euref-ip@bkg.bund.de".
-
-
------add by mnltake
-CentOS install
-
-$ sudo yum update -y
-$ sudo yum install git gcc nano
-$ git clone https://github.com/mnltake/ntripcaster.git
-$ cd ntripcaster/ntripcaster0.1.5/
-$ ./configue
-$ make
-$ sudo make install
-$ cd usr/local/ntripcaster/conf
-$ sudo nano ntripcaster.conf.dist
--modify and save as ntripcaster.conf
-$ sudo nano sourcetable.dat.dist
--modify and save as sourcetable.dat
-$ cd  usr/local/ntripcaster/bin
-$ ./ntripcaster
-(auto start)
-$ cd ntripcaster/ntripcaster0.1.5/
-$ sudo chmod 755 ./ntripcaster.sh
-$ sudo mv ntripcaster.service /etc/systemd/system
-$ sudo systemctrl start ntripcaster.service
-$ sudo systemctrl enable ntripcaster.service
+Original NtripCaster: http://igs.bkg.bund.de/index_ntrip.htm
+This fork: https://github.com/yasunorioi/ntripcaster
