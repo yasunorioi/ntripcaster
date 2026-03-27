@@ -27,3 +27,22 @@
 *.i*86
 *.x86_64
 *.hex
+
+# Autotools build artifacts
+**/autom4te.cache/
+**/config.log
+**/config.status
+**/stamp-h1
+**/compile
+**/depcomp
+**/config.h.in~
+**/configure~
+**/.deps/
+*.log
+
+# Build outputs (generated Makefiles, binaries, conf dist)
+ntripcaster0.1.5/Makefile
+ntripcaster0.1.5/src/Makefile
+ntripcaster0.1.5/conf/Makefile
+ntripcaster0.1.5/src/ntripcaster
+ntripcaster0.1.5/conf/ntripcaster.conf.dist

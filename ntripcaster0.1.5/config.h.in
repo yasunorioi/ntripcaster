@@ -1,66 +1,24 @@
-/* config.h.in.  Generated automatically from configure.in by autoheader 2.13.  */
-
-/* Define if on AIX 3.
-   System headers sometimes define this.
-   We just want to avoid a redefinition error message.  */
-#ifndef _ALL_SOURCE
-#undef _ALL_SOURCE
-#endif
-
-/* Define to empty if the keyword does not work.  */
-#undef const
-
-/* Define if you don't have vprintf but do have _doprnt.  */
-#undef HAVE_DOPRNT
-
-/* Define if you have the strftime function.  */
-#undef HAVE_STRFTIME
-
-/* Define if you have <sys/wait.h> that is POSIX.1 compatible.  */
-#undef HAVE_SYS_WAIT_H
-
-/* Define if you have the vprintf function.  */
-#undef HAVE_VPRINTF
-
-/* Define if on MINIX.  */
-#undef _MINIX
-
-/* Define to `int' if <sys/types.h> doesn't define.  */
-#undef pid_t
-
-/* Define if the system does not provide POSIX.1 features except
-   with this defined.  */
-#undef _POSIX_1_SOURCE
-
-/* Define if you need to in order for stat and other things to work.  */
-#undef _POSIX_SOURCE
-
-/* Define as the return type of signal handlers (int or void).  */
-#undef RETSIGTYPE
-
-/* Define to `unsigned' if <sys/types.h> doesn't define.  */
-#undef size_t
-
-/* Define if you have the ANSI C header files.  */
-#undef STDC_HEADERS
-
-/* Define on System V Release 4.  */
-#undef SVR4
-
-/* Define if you can safely include both <sys/time.h> and <time.h>.  */
-#undef TIME_WITH_SYS_TIME
-
-/* Define if your <sys/time.h> declares struct tm.  */
-#undef TM_IN_SYS_TIME
-
+/* config.h.in.  Generated from configure.in by autoheader.  */
 /* Whether to use crypted passwords */
 #undef USE_CRYPT
 
 /* Whether to use tcp_wrappers */
 #undef HAVE_LIBWRAP
 
+/* User want readline */
+#undef HAVE_LIBREADLINE
+
 /* Some systems have sys/syslog.h */
 #undef NEED_SYS_SYSLOG_H
+
+/* Any threads around? */
+#undef HAVE_PTHREAD_H
+
+/* Some systems don't have assert.h */
+#undef HAVE_ASSERT_H
+
+/* Or here? */
+#undef HAVE_PTHREAD_NP_H
 
 /* We might be the silly hpux */
 #undef hpux
@@ -83,16 +41,19 @@
 /* UNIX98 and others want socklen_t */
 #undef HAVE_SOCKLEN_T
 
-/* The complete version of icecast */
+/* The complete version of ntripcaster */
 #undef VERSION
 
 /* Definately Solaris */
 #undef SOLARIS
 
 /* directories that we use... blah blah blah */
-#undef LITTLECASTER_ETCDIR
-#undef LITTLECASTER_LOGDIR
-#undef LITTLECASTER_TEMPLATEDIR
+#undef ICECAST_ETCDIR
+#undef ICECAST_LOGDIR
+#undef ICECAST_TEMPLATEDIR
+
+/* What the hell is this? */
+#undef PACKAGE
 
 /* DAMN I HATE HATE HATE AUTOCONF */
 #undef HAVE_SOCKET
@@ -101,168 +62,257 @@
 #undef HAVE_NANOSLEEP
 #undef HAVE_YP_GET_DEFAULT_DOMAIN
 
-/* Define if you have the basename function.  */
-#undef HAVE_BASENAME
-
-/* Define if you have the connect function.  */
-#undef HAVE_CONNECT
-
-/* Define if you have the gethostbyaddr_r function.  */
-#undef HAVE_GETHOSTBYADDR_R
-
-/* Define if you have the gethostbyname function.  */
-#undef HAVE_GETHOSTBYNAME
-
-/* Define if you have the gethostbyname_r function.  */
-#undef HAVE_GETHOSTBYNAME_R
-
-/* Define if you have the getrlimit function.  */
-#undef HAVE_GETRLIMIT
-
-/* Define if you have the gettimeofday function.  */
-#undef HAVE_GETTIMEOFDAY
-
-/* Define if you have the inet_addr function.  */
-#undef HAVE_INET_ADDR
-
-/* Define if you have the inet_aton function.  */
-#undef HAVE_INET_ATON
-
-/* Define if you have the inet_ntoa function.  */
-#undef HAVE_INET_NTOA
-
-/* Define if you have the localtime_r function.  */
-#undef HAVE_LOCALTIME_R
-
-/* Define if you have the log function.  */
-#undef HAVE_LOG
-
-/* Define if you have the lseek function.  */
-#undef HAVE_LSEEK
-
-/* Define if you have the mallinfo function.  */
-#undef HAVE_MALLINFO
-
-/* Define if you have the mcheck function.  */
-#undef HAVE_MCHECK
-
-/* Define if you have the mtrace function.  */
-#undef HAVE_MTRACE
-
-/* Define if you have the nanosleep function.  */
-#undef HAVE_NANOSLEEP
-
-/* Define if you have the pthread_attr_setstacksize function.  */
-#undef HAVE_PTHREAD_ATTR_SETSTACKSIZE
-
-/* Define if you have the pthread_create function.  */
-#undef HAVE_PTHREAD_CREATE
-
-/* Define if you have the pthread_sigmask function.  */
-#undef HAVE_PTHREAD_SIGMASK
-
-/* Define if you have the rename function.  */
-#undef HAVE_RENAME
-
-/* Define if you have the select function.  */
-#undef HAVE_SELECT
-
-/* Define if you have the setpgid function.  */
-#undef HAVE_SETPGID
-
-/* Define if you have the setrlimit function.  */
-#undef HAVE_SETRLIMIT
-
-/* Define if you have the setsockopt function.  */
-#undef HAVE_SETSOCKOPT
-
-/* Define if you have the sigaction function.  */
-#undef HAVE_SIGACTION
-
-/* Define if you have the snprintf function.  */
-#undef HAVE_SNPRINTF
-
-/* Define if you have the socket function.  */
-#undef HAVE_SOCKET
-
-/* Define if you have the strstr function.  */
-#undef HAVE_STRSTR
-
-/* Define if you have the umask function.  */
-#undef HAVE_UMASK
-
-/* Define if you have the vsnprintf function.  */
-#undef HAVE_VSNPRINTF
-
-/* Define if you have the yp_get_default_domain function.  */
-#undef HAVE_YP_GET_DEFAULT_DOMAIN
-
-/* Define if you have the <Python.h> header file.  */
-#undef HAVE_PYTHON_H
-
-/* Define if you have the <assert.h> header file.  */
+/* Define to 1 if you have the <assert.h> header file. */
 #undef HAVE_ASSERT_H
 
-/* Define if you have the <dirent.h> header file.  */
+/* Define to 1 if you have the 'basename' function. */
+#undef HAVE_BASENAME
+
+/* Define to 1 if you have the 'connect' function. */
+#undef HAVE_CONNECT
+
+/* Define to 1 if you have the <dirent.h> header file, and it defines 'DIR'.
+   */
 #undef HAVE_DIRENT_H
 
-/* Define if you have the <fcntl.h> header file.  */
+/* Define to 1 if you don't have 'vprintf' but do have '_doprnt.' */
+#undef HAVE_DOPRNT
+
+/* Define to 1 if you have the <fcntl.h> header file. */
 #undef HAVE_FCNTL_H
 
-/* Define if you have the <history.h> header file.  */
+/* Define to 1 if you have the 'gethostbyaddr_r' function. */
+#undef HAVE_GETHOSTBYADDR_R
+
+/* Define to 1 if you have the 'gethostbyname' function. */
+#undef HAVE_GETHOSTBYNAME
+
+/* Define to 1 if you have the 'gethostbyname_r' function. */
+#undef HAVE_GETHOSTBYNAME_R
+
+/* Define to 1 if you have the 'getrlimit' function. */
+#undef HAVE_GETRLIMIT
+
+/* Define to 1 if you have the 'gettimeofday' function. */
+#undef HAVE_GETTIMEOFDAY
+
+/* Define to 1 if you have the <history.h> header file. */
 #undef HAVE_HISTORY_H
 
-/* Define if you have the <machine/soundcard.h> header file.  */
-#undef HAVE_MACHINE_SOUNDCARD_H
+/* Define to 1 if you have the 'inet_addr' function. */
+#undef HAVE_INET_ADDR
 
-/* Define if you have the <malloc.h> header file.  */
-#undef HAVE_MALLOC_H
+/* Define to 1 if you have the 'inet_aton' function. */
+#undef HAVE_INET_ATON
 
-/* Define if you have the <math.h> header file.  */
-#undef HAVE_MATH_H
+/* Define to 1 if you have the 'inet_ntoa' function. */
+#undef HAVE_INET_NTOA
 
-/* Define if you have the <mcheck.h> header file.  */
-#undef HAVE_MCHECK_H
+/* Define to 1 if you have the <inttypes.h> header file. */
+#undef HAVE_INTTYPES_H
 
-/* Define if you have the <ndir.h> header file.  */
-#undef HAVE_NDIR_H
-
-/* Define if you have the <pthread.h> header file.  */
-#undef HAVE_PTHREAD_H
-
-/* Define if you have the <signal.h> header file.  */
-#undef HAVE_SIGNAL_H
-
-/* Define if you have the <sys/dir.h> header file.  */
-#undef HAVE_SYS_DIR_H
-
-/* Define if you have the <sys/ndir.h> header file.  */
-#undef HAVE_SYS_NDIR_H
-
-/* Define if you have the <sys/resource.h> header file.  */
-#undef HAVE_SYS_RESOURCE_H
-
-/* Define if you have the <sys/signal.h> header file.  */
-#undef HAVE_SYS_SIGNAL_H
-
-/* Define if you have the <sys/soundcard.h> header file.  */
-#undef HAVE_SYS_SOUNDCARD_H
-
-/* Define if you have the <sys/time.h> header file.  */
-#undef HAVE_SYS_TIME_H
-
-/* Define if you have the <unistd.h> header file.  */
-#undef HAVE_UNISTD_H
-
-/* Define if you have the dl library (-ldl).  */
+/* Define to 1 if you have the 'dl' library (-ldl). */
 #undef HAVE_LIBDL
 
-/* Define if you have the readline library (-lreadline).  */
+/* Define to 1 if you have the 'readline' library (-lreadline). */
 #undef HAVE_LIBREADLINE
+
+/* Define to 1 if you have the 'localtime_r' function. */
+#undef HAVE_LOCALTIME_R
+
+/* Define to 1 if you have the 'log' function. */
+#undef HAVE_LOG
+
+/* Define to 1 if you have the 'lseek' function. */
+#undef HAVE_LSEEK
+
+/* Define to 1 if you have the <machine/soundcard.h> header file. */
+#undef HAVE_MACHINE_SOUNDCARD_H
+
+/* Define to 1 if you have the 'mallinfo' function. */
+#undef HAVE_MALLINFO
+
+/* Define to 1 if you have the <malloc.h> header file. */
+#undef HAVE_MALLOC_H
+
+/* Define to 1 if you have the <math.h> header file. */
+#undef HAVE_MATH_H
+
+/* Define to 1 if you have the 'mcheck' function. */
+#undef HAVE_MCHECK
+
+/* Define to 1 if you have the <mcheck.h> header file. */
+#undef HAVE_MCHECK_H
+
+/* Define to 1 if you have the 'mtrace' function. */
+#undef HAVE_MTRACE
+
+/* Define to 1 if you have the 'nanosleep' function. */
+#undef HAVE_NANOSLEEP
+
+/* Define to 1 if you have the <ndir.h> header file, and it defines 'DIR'. */
+#undef HAVE_NDIR_H
+
+/* Define to 1 if you have the 'pthread_attr_setstacksize' function. */
+#undef HAVE_PTHREAD_ATTR_SETSTACKSIZE
+
+/* Define to 1 if you have the 'pthread_create' function. */
+#undef HAVE_PTHREAD_CREATE
+
+/* Define to 1 if you have the <pthread.h> header file. */
+#undef HAVE_PTHREAD_H
+
+/* Define to 1 if you have the 'pthread_sigmask' function. */
+#undef HAVE_PTHREAD_SIGMASK
+
+/* Define to 1 if you have the <Python.h> header file. */
+#undef HAVE_PYTHON_H
+
+/* Define to 1 if you have the 'rename' function. */
+#undef HAVE_RENAME
+
+/* Define to 1 if you have the 'select' function. */
+#undef HAVE_SELECT
+
+/* Define to 1 if you have the 'setpgid' function. */
+#undef HAVE_SETPGID
+
+/* Define to 1 if you have the 'setrlimit' function. */
+#undef HAVE_SETRLIMIT
+
+/* Define to 1 if you have the 'setsockopt' function. */
+#undef HAVE_SETSOCKOPT
+
+/* Define to 1 if you have the 'sigaction' function. */
+#undef HAVE_SIGACTION
+
+/* Define to 1 if you have the <signal.h> header file. */
+#undef HAVE_SIGNAL_H
+
+/* Define to 1 if you have the 'snprintf' function. */
+#undef HAVE_SNPRINTF
+
+/* Define to 1 if you have the 'socket' function. */
+#undef HAVE_SOCKET
+
+/* Define if socklen_t is available */
+#undef HAVE_SOCKLEN_T
+
+/* Define to 1 if you have the <stdint.h> header file. */
+#undef HAVE_STDINT_H
+
+/* Define to 1 if you have the <stdio.h> header file. */
+#undef HAVE_STDIO_H
+
+/* Define to 1 if you have the <stdlib.h> header file. */
+#undef HAVE_STDLIB_H
+
+/* Define to 1 if you have the <strings.h> header file. */
+#undef HAVE_STRINGS_H
+
+/* Define to 1 if you have the <string.h> header file. */
+#undef HAVE_STRING_H
+
+/* Define to 1 if you have the 'strstr' function. */
+#undef HAVE_STRSTR
+
+/* Define to 1 if you have the <sys/dir.h> header file, and it defines 'DIR'.
+   */
+#undef HAVE_SYS_DIR_H
+
+/* Define to 1 if you have the <sys/ndir.h> header file, and it defines 'DIR'.
+   */
+#undef HAVE_SYS_NDIR_H
+
+/* Define to 1 if you have the <sys/resource.h> header file. */
+#undef HAVE_SYS_RESOURCE_H
+
+/* Define to 1 if you have the <sys/signal.h> header file. */
+#undef HAVE_SYS_SIGNAL_H
+
+/* Define to 1 if you have the <sys/soundcard.h> header file. */
+#undef HAVE_SYS_SOUNDCARD_H
+
+/* Define to 1 if you have the <sys/stat.h> header file. */
+#undef HAVE_SYS_STAT_H
+
+/* Define to 1 if you have the <sys/time.h> header file. */
+#undef HAVE_SYS_TIME_H
+
+/* Define to 1 if you have the <sys/types.h> header file. */
+#undef HAVE_SYS_TYPES_H
+
+/* Define to 1 if you have <sys/wait.h> that is POSIX.1 compatible. */
+#undef HAVE_SYS_WAIT_H
+
+/* Define to 1 if you have the 'umask' function. */
+#undef HAVE_UMASK
+
+/* Define to 1 if you have the <unistd.h> header file. */
+#undef HAVE_UNISTD_H
+
+/* Define to 1 if you have the 'vprintf' function. */
+#undef HAVE_VPRINTF
+
+/* Define to 1 if you have the 'vsnprintf' function. */
+#undef HAVE_VSNPRINTF
+
+/* Define to 1 if you have the 'yp_get_default_domain' function. */
+#undef HAVE_YP_GET_DEFAULT_DOMAIN
+
+/* Define if sys/syslog.h is needed */
+#undef NEED_SYS_SYSLOG_H
+
+/* Relative path from install prefix to config directory */
+#undef NTRIPCASTER_ETCDIR
+
+/* Relative path from install prefix to log directory */
+#undef NTRIPCASTER_LOGDIR
 
 /* Name of package */
 #undef PACKAGE
 
-/* Version number of package */
+/* Define to the address where bug reports for this package should be sent. */
+#undef PACKAGE_BUGREPORT
+
+/* Define to the full name of this package. */
+#undef PACKAGE_NAME
+
+/* Define to the full name and version of this package. */
+#undef PACKAGE_STRING
+
+/* Define to the one symbol short name of this package. */
+#undef PACKAGE_TARNAME
+
+/* Define to the home page for this package. */
+#undef PACKAGE_URL
+
+/* Define to the version of this package. */
+#undef PACKAGE_VERSION
+
+/* Return type of signal handlers */
+#undef RETSIGTYPE
+
+/* Define to 1 if all of the C89 standard headers exist (not just the ones
+   required in a freestanding environment). This macro is provided for
+   backward compatibility; new code need not use it. */
+#undef STDC_HEADERS
+
+/* Define to 1 if you can safely include both <sys/time.h> and <time.h>. This
+   macro is obsolete. */
+#undef TIME_WITH_SYS_TIME
+
+/* Define to 1 if your <sys/time.h> declares 'struct tm'. */
+#undef TM_IN_SYS_TIME
+
+/* Package version string */
 #undef VERSION
 
+/* Define to empty if 'const' does not conform to ANSI C. */
+#undef const
+
+/* Define as a signed integer type capable of holding a process identifier. */
+#undef pid_t
+
+/* Define as 'unsigned int' if <stddef.h> doesn't define. */
+#undef size_t
