@@ -51,4 +51,16 @@ pub fn build(b: *std.Build) void {
     b.step("test", "Run all unit tests").dependOn(
         &b.addRunArtifact(unit_tests).step,
     );
+
+    // ── Integration tests (TCP接続テスト) ────────────────────────────────────
+    const int_tests = b.addTest(.{
+        .root_source_file = b.path("tests/test_server.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    int_tests.root_module.addImport("ntripcaster", ntripcaster_mod);
+
+    b.step("test-integration", "Run integration tests (TCP)").dependOn(
+        &b.addRunArtifact(int_tests).step,
+    );
 }

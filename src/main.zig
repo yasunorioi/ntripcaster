@@ -1,12 +1,11 @@
 //! main.zig — NtripCaster 0.2.0 (Zig リライト) エントリポイント
 //!
-//! Phase 2a: 設定読み込みまで実装。サーバー起動は Phase 2c で追加。
-//!
 //! 使用例:
 //!   ntripcaster -c /etc/ntripcaster/ntripcaster.conf
 
 const std = @import("std");
 const parser = @import("config/parser.zig");
+const server_mod = @import("server.zig");
 
 const usage =
     \\Usage: ntripcaster [-c <configfile>] [-h]
@@ -27,7 +26,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // 設定文字列用 Arena（長寿命）
+    // 設定文字列用 Arena（長寿命: サーバー終了まで保持）
     var config_arena = std.heap.ArenaAllocator.init(allocator);
     defer config_arena.deinit();
 
@@ -60,7 +59,7 @@ pub fn main() !void {
     const file_content = std.fs.cwd().readFileAlloc(
         config_arena.allocator(),
         config_path,
-        1024 * 1024, // 最大 1 MiB
+        1024 * 1024,
     ) catch |err| {
         std.debug.print("Error: cannot read config file '{s}': {}\n", .{ config_path, err });
         std.process.exit(1);
@@ -72,28 +71,29 @@ pub fn main() !void {
     };
     defer config.deinit();
 
+    // conf_dir: 設定ファイルのディレクトリ（sourcetable.dat の場所）
+    const conf_dir = std.fs.path.dirname(config_path) orelse "conf";
+
+    // ── ServerState 初期化 ──────────────────────────────────────────────────
+    var state = server_mod.ServerState.init(allocator, &config, conf_dir);
+    defer state.deinit();
+
     // ── 起動バナー ──────────────────────────────────────────────────────────
-    std.debug.print(
-        \\NtripCaster 0.2.0 (Zig)
-        \\Config file : {s}
-        \\server_name : {s}
-        \\port        : {d}
-        \\max_clients : {d}
-        \\max_sources : {d}
-        \\encoder_pass: {s}
-        \\logdir      : {s}
-        \\mounts      : {d}
-        \\
-        \\(Server startup not yet implemented — Phase 2c)
-        \\
-    , .{
-        config_path,
-        config.server_name,
-        config.port,
-        config.max_clients,
-        config.max_sources,
-        config.encoder_password,
-        config.logdir,
-        config.mounts.count(),
-    });
+    state.logger.info(
+        "NtripCaster 0.2.0 (Zig) | server={s} port={d} max_clients={d} mounts={d}",
+        .{
+            config.server_name,
+            config.port,
+            config.max_clients,
+            config.mounts.count(),
+        },
+    );
+
+    // ── サーバー起動（SIGINT/SIGTERM で終了） ───────────────────────────────
+    server_mod.listen(&state) catch |err| {
+        state.logger.err("server error: {}", .{err});
+        std.process.exit(1);
+    };
+
+    state.logger.info("NtripCaster stopped.", .{});
 }
