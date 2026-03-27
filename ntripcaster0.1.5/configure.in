@@ -1,6 +1,6 @@
 
 
-AC_INIT(src/main.c)
+AC_INIT([ntripcaster], [0.1.5], [])
 
 NTRIPCASTER_MAJOR=0
 NTRIPCASTER_MINOR=1
@@ -13,8 +13,8 @@ VERSION="$NTRIPCASTER_VERSION"
 
 echo "Building Ntripcaster-$VERSION..."
 
-AM_INIT_AUTOMAKE($PACKAGE, $VERSION)
-AM_MAINTAINER_MODE
+AM_INIT_AUTOMAKE([foreign])
+AM_MAINTAINER_MODE([enable])
 
 if test "x$prefix" = "xNONE"; then
 	prefix="/usr/local/ntripcaster"
@@ -29,21 +29,22 @@ NTRIPCASTER_ETCDIR=conf
 NTRIPCASTER_LOGDIR=logs
 NTRIPCASTER_SHAREDIR=${prefix}
 
-AM_CONFIG_HEADER(config.h)
+AC_CONFIG_HEADERS([config.h])
 
-AC_DEFINE_UNQUOTED(VERSION, "$VERSION")
+AC_DEFINE_UNQUOTED([VERSION], ["$VERSION"], [Package version string])
 AC_SUBST(VERSION)
 
 AC_SUBST(NTRIPCASTER_BINDIR)
 AC_SUBST(NTRIPCASTER_ETCDIR_INST)
 AC_SUBST(NTRIPCASTER_LOGDIR_INST)
 
-AC_DEFINE_UNQUOTED(NTRIPCASTER_ETCDIR, "$NTRIPCASTER_ETCDIR")
+AC_DEFINE_UNQUOTED([NTRIPCASTER_ETCDIR], ["$NTRIPCASTER_ETCDIR"],
+  [Relative path from install prefix to config directory])
 AC_SUBST(NTRIPCASTER_ETCDIR)
-AC_DEFINE_UNQUOTED(NTRIPCASTER_LOGDIR, "$NTRIPCASTER_LOGDIR")
+AC_DEFINE_UNQUOTED([NTRIPCASTER_LOGDIR], ["$NTRIPCASTER_LOGDIR"],
+  [Relative path from install prefix to log directory])
 AC_SUBST(NTRIPCASTER_LOGDIR)
 
-AC_ARG_PROGRAM
 AC_PROG_RANLIB
 AC_PROG_CC
 
@@ -53,11 +54,6 @@ fi
 
 AC_CHECK_PROG(UNAME,uname,uname)
 AC_PROG_INSTALL
-
-dnl weird ass systems
-AC_AIX
-AC_ISC_POSIX
-AC_MINIX
 
 AC_MSG_CHECKING(your OS)
 system=`$UNAME`
@@ -110,10 +106,9 @@ case $system in
 		OLDCPPFLAGS=$CPPFLAGS
 		THREADCPPFLAGS="-pthread"
 		CPPFLAGS="$OLDCPPFLAGS $THREADCPPFLAGS"
-		AC_TRY_COMPILE([#include <pthread.h>],
-			       [pthread_t thread; ],	
-	       		       ,
-			       	CPPFLAGS="$OLDCPPFLAGS")
+		AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <pthread.h>]],[[pthread_t thread; (void)thread;]])],
+			       [],
+			       [CPPFLAGS="$OLDCPPFLAGS"])
 		CPPFLAGS=$OLDCPPFLAGS
 		if test "$CC" = gcc; then
 			CFLAGS="-pthreads $CFLAGS"
@@ -257,8 +252,7 @@ AC_ARG_WITH(libwrap,
 	fi
 	OLDLIBS="$LIBS"
 	LIBS="$WRAPLIBS $LIBS"
-	AC_TRY_LINK([int allow_severity; int deny_severity; ],
-		    [hosts_access(); ],
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[int allow_severity; int deny_severity;]],[[hosts_access();]])],
 		    [],
 		    [AC_MSG_ERROR(Could not find the $withval library. You must first install tcp_wrappers.)])
 	    LIBS="$OLDLIBS"
@@ -312,14 +306,16 @@ AC_SUBST(CRYPTLIB)
 THREADLIBS="no"
 
 AC_MSG_CHECKING(for pthread functions in standard libraries)
-AC_TRY_LINK(, [pthread_create();],AC_MSG_RESULT(yes);THREADLIBS="",AC_MSG_RESULT(no))
+AC_LINK_IFELSE([AC_LANG_CALL([], [pthread_create])],
+	[AC_MSG_RESULT(yes); THREADLIBS=""],
+	[AC_MSG_RESULT(no)])
 
 if test "$THREADLIBS" = ""; then
 	AC_MSG_CHECKING(if that definition really works)
-	AC_TRY_RUN([int main() { return !pthread_equal(pthread_self(), pthread_self());}],
-		    AC_MSG_RESULT(yes);THREADLIBS="",
-		    AC_MSG_RESULT(no);THREADLIBS="no",
-		    AC_MSG_RESULT(crosscompiling so no);THREADLIBS="no")
+	AC_RUN_IFELSE([AC_LANG_PROGRAM([], [return !pthread_equal(pthread_self(), pthread_self());])],
+		    [AC_MSG_RESULT(yes); THREADLIBS=""],
+		    [AC_MSG_RESULT(no); THREADLIBS="no"],
+		    [AC_MSG_RESULT(crosscompiling so no); THREADLIBS="no"])
 fi
 
 if test "$THREADLIBS" = "no"; then
@@ -374,10 +370,9 @@ AC_CHECK_LIB(dl, dlopen)
 	done
 fi
 
-AC_TRY_COMPILE([#include <syslog.h>],
-               [int foo = LOG_DAEMON; ],
-               ,
-               AC_DEFINE(NEED_SYS_SYSLOG_H))
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <syslog.h>]],[[int foo = LOG_DAEMON; (void)foo;]])],
+               [],
+               [AC_DEFINE([NEED_SYS_SYSLOG_H], [1], [Define if sys/syslog.h is needed])])
 
 dnl Checks for header files.
 AC_HEADER_STDC
@@ -389,33 +384,30 @@ dnl Checks for typedefs, structures, and compiler characteristics.
 AC_C_CONST
 AC_TYPE_PID_T
 AC_TYPE_SIZE_T
-AC_TYPE_SIGNAL
 AC_HEADER_TIME
 AC_STRUCT_TM
-AC_RETSIGTYPE
+
+dnl Signal handlers always return void on POSIX systems
+AC_DEFINE([RETSIGTYPE], [void], [Return type of signal handlers])
 
 AC_MSG_CHECKING([for unix98 socklen_t])
-AC_TRY_COMPILE([#include <sys/types.h>
-		#include <sys/socket.h>],
-	    [typedef socklen_t int; 
-	    int apan (void) {return 1;}],
-	AC_MSG_RESULT(yeah)
-	HAVE_SOCKLEN_T=yes,
-	AC_MSG_RESULT(nah)
-	HAVE_SOCKLEN_T=no)
-
-if test ${HAVE_SOCKLEN_T} = yes ;then 
-	AC_DEFINE(HAVE_SOCKLEN_T)		
-fi
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM([[#include <sys/types.h>
+		#include <sys/socket.h>]],
+		[[socklen_t x = 0; (void)x;]])],
+	[AC_MSG_RESULT(yes)
+	AC_DEFINE([HAVE_SOCKLEN_T], [1], [Define if socklen_t is available])],
+	[AC_MSG_RESULT(no)])
 
 dnl Checks for library functions.
-AC_FUNC_STRFTIME
 AC_FUNC_VPRINTF
 
 AC_CHECK_FUNCS(gettimeofday strstr snprintf vsnprintf rename setpgid basename setsockopt gethostbyname_r gethostbyaddr_r getrlimit setrlimit umask inet_addr inet_aton localtime_r select pthread_attr_setstacksize inet_ntoa mcheck mallinfo mtrace sigaction pthread_sigmask lseek)
 
 AC_MSG_CHECKING(if libm is bundled with some lib we're already linking)
-AC_TRY_LINK(, [sin(1);],AC_MSG_RESULT(yes);LDLAGS="",AC_MSG_RESULT(no);LDFLAGS="-lm")
+AC_LINK_IFELSE([AC_LANG_CALL([], [sin])],
+	[AC_MSG_RESULT(yes)],
+	[AC_MSG_RESULT(no); LDFLAGS="$LDFLAGS -lm"])
 
 AC_OUTPUT([Makefile src/Makefile conf/Makefile conf/ntripcaster.conf.dist])
 

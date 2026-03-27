@@ -11,7 +11,7 @@ noinst_HEADERS = avl.h client.h	definitions.h connection.h	\
 ntripcaster_SOURCES = main.c client.c source.c connection.c log.c \
 			sock.c threads.c utility.c avl.c timer.c ntrip_string.c
 
-INCLUDES = -D_REENTRANT @WRAPINCLUDES@
+AM_CPPFLAGS = -D_REENTRANT @WRAPINCLUDES@
 
 bindir=$(NTRIPCASTER_BINDIR)
 
