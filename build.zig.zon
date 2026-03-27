@@ -1,0 +1,14 @@
+.{
+    .name = .ntripcaster,
+    .fingerprint = 0xcddfcadd563310fb,
+    .version = "0.2.0",
+    .minimum_zig_version = "0.14.0",
+    .dependencies = .{},
+    .paths = .{
+        "src",
+        "tests",
+        "conf",
+        "build.zig",
+        "build.zig.zon",
+    },
+}
