@@ -87,8 +87,18 @@
 #define DEFAULT_ENCODER_PASSWORD "sesam01"
 #define DEFAULT_CLIENT_PASSWORD "prettyplease"
 #define DEFAULT_LOGFILE "ntripcaster.log"
-#define DEFAULT_LOG_DIR "."
-#define DEFAULT_ETC_DIR "."
+/* Use configure-generated directory names (relative to install prefix).
+ * Falls back to "conf" / "logs" if configure was not run. */
+#ifdef NTRIPCASTER_ETCDIR
+# define DEFAULT_ETC_DIR NTRIPCASTER_ETCDIR
+#else
+# define DEFAULT_ETC_DIR "conf"
+#endif
+#ifdef NTRIPCASTER_LOGDIR
+# define DEFAULT_LOG_DIR NTRIPCASTER_LOGDIR
+#else
+# define DEFAULT_LOG_DIR "logs"
+#endif
 #define DEFAULT_CONFIG_FILE "ntripcaster.conf"
 #define DEFAULT_STATUSTIME 60
 #define DEFAULT_LOCATION "BKG Geodetic Department"

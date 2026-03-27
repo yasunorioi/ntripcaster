@@ -378,7 +378,14 @@ send_sourcetable (connection_t *con) {
 	sock_write_line (con->sock, "SOURCETABLE 200 OK");
 	sock_write_line (con->sock, "Server: NTRIP NtripCaster %s/%s", info.version, info.ntrip_version);
 //	sock_write_line (con->sock, "Date: %s %s", time, info.timezone);
-	ifp = fopen("../conf/sourcetable.dat","r");
+	{
+		/* Use info.etcdir (set from prefix/conf at configure time) instead of
+		 * the hardcoded relative path "../conf/sourcetable.dat". */
+		char sourcetable_path[BUFSIZE];
+		snprintf(sourcetable_path, sizeof(sourcetable_path), "%s%c%s",
+		         info.etcdir, DIR_DELIMITER, "sourcetable.dat");
+		ifp = fopen(sourcetable_path, "r");
+	}
 	if (ifp != NULL) {
 		fseek(ifp, 0, SEEK_END);
 		fsize = (int)ftell(ifp);
