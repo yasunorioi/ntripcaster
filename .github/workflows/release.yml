@@ -80,8 +80,9 @@ jobs:
             ${{ steps.version.outputs.VERSION }} \
             ${{ matrix.deb_arch }}
 
-      # ── .rpm ─────────────────────────────────────────────────────────────────
+      # ── .rpm (x86_64 only — rpmbuild on ubuntu cannot cross-build) ──────────
       - name: Build .rpm
+        if: matrix.target == 'x86_64-linux-musl'
         run: |
           packaging/build-rpm.sh \
             dist/${{ matrix.target }}/bin/ntripcaster \
@@ -101,7 +102,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          fail_on_unmatched_files: true
+          fail_on_unmatched_files: false
           files: |
             ntripcaster-${{ steps.version.outputs.VERSION }}-${{ matrix.binary_suffix }}
             ntripcaster_${{ steps.version.outputs.VERSION }}_${{ matrix.deb_arch }}.deb
