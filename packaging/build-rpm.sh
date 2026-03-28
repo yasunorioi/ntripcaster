@@ -33,6 +33,8 @@ sed -e "s/@VERSION@/${VERSION}/g" -e "s/@RPMARCH@/${ARCH}/g" \
 
 rpmbuild --target "${ARCH}" \
   --define "_topdir ${RPMBUILD_ROOT}" \
+  --define "__os_install_post %{nil}" \
+  --define "_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm" \
   -bb "${RPMBUILD_ROOT}/SPECS/ntripcaster.spec"
 
 # Copy built RPM to repo root
