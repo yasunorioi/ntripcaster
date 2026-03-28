@@ -1,3 +1,21 @@
+ntripcaster — NTRIP v1 Caster
+
+Original NtripCaster (C implementation, version 0.1.5):
+  Copyright (C) BKG (Bundesamt für Geodäsie und Kartographie),
+  Frankfurt am Main, Germany.
+  Developed by Lesparre, Weber — BKG.
+  http://igs.bkg.bund.de/ntrip/download
+
+Zig rewrite (this repository):
+  Copyright (C) yasunorioi.
+  Original C source preserved in /legacy/ without modification.
+
+Both the original and this rewrite are distributed under the terms of the
+GNU General Public License, Version 2, as published by the Free Software
+Foundation. See full license text below.
+
+-------------------------------------------------------------------------------
+
 GNU GENERAL PUBLIC LICENSE
                        Version 2, June 1991
 
