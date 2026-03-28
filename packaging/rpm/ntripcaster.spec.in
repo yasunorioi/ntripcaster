@@ -1,0 +1,58 @@
+Name:           ntripcaster
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        NTRIP Caster — GNSS real-time data streaming server
+License:        MIT
+URL:            https://github.com/yasunorioi/ntripcaster
+
+# Source tarball is not used; binary is pre-built by CI
+# Source0:      ntripcaster-@VERSION@.tar.gz
+
+BuildArch:      @RPMARCH@
+
+%description
+A modern, zero-dependency rewrite of the BKG NtripCaster 0.1.5 in Zig.
+Streams RTCM3 correction data from base stations to rover clients over
+the NTRIP v1 protocol. Statically linked; no libc required.
+
+Original C implementation by BKG (Federal Agency for Cartography and
+Geodesy, Germany). Zig rewrite by Yasunori Oi.
+
+%install
+mkdir -p %{buildroot}/usr/local/bin
+mkdir -p %{buildroot}/usr/local/share/doc/%{name}
+mkdir -p %{buildroot}/lib/systemd/system
+mkdir -p %{buildroot}/etc/ntripcaster
+
+install -m 0755 %{_sourcedir}/ntripcaster %{buildroot}/usr/local/bin/ntripcaster
+install -m 0644 %{_sourcedir}/ntripcaster.service %{buildroot}/lib/systemd/system/ntripcaster.service
+install -m 0644 %{_sourcedir}/ntripcaster.conf %{buildroot}/etc/ntripcaster/ntripcaster.conf
+
+%files
+/usr/local/bin/ntripcaster
+/lib/systemd/system/ntripcaster.service
+%config(noreplace) /etc/ntripcaster/ntripcaster.conf
+
+%pre
+getent passwd ntripcaster >/dev/null 2>&1 || \
+  useradd -r -s /sbin/nologin -d /var/empty -M ntripcaster
+mkdir -p /var/log/ntripcaster
+chown ntripcaster:ntripcaster /var/log/ntripcaster
+
+%post
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+  systemctl enable ntripcaster.service || true
+fi
+
+%preun
+if [ "$1" -eq 0 ]; then
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now ntripcaster.service || true
+  fi
+fi
+
+%postun
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi

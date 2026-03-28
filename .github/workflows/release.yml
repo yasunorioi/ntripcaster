@@ -1,0 +1,202 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # required for gh-release upload
+
+jobs:
+  build:
+    name: "Build ${{ matrix.target }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Desktop / Server ─────────────────────────────────────────────────
+          - target: x86_64-linux-musl
+            binary_suffix: x86_64-linux
+            deb_arch: amd64
+            rpm_arch: x86_64
+            opkg_arch: x86_64
+          # ── Raspberry Pi 4 / ARM64 servers ──────────────────────────────────
+          - target: aarch64-linux-musl
+            binary_suffix: aarch64-linux
+            deb_arch: arm64
+            rpm_arch: aarch64
+            opkg_arch: aarch64_generic
+          # ── Raspberry Pi 2/3 (32-bit) ────────────────────────────────────────
+          - target: arm-linux-musleabihf
+            binary_suffix: armv7-linux
+            deb_arch: armhf
+            rpm_arch: armv7hl
+            opkg_arch: arm_cortex-a7_neon-vfpv4
+          # ── OpenWRT MIPS (TP-Link / Ubiquiti) ────────────────────────────────
+          - target: mipsel-linux-musl
+            binary_suffix: mipsel-linux
+            deb_arch: mipsel
+            rpm_arch: mipsel
+            opkg_arch: mipsel_24kc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.14.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev rpm binutils
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary
+        run: |
+          zig build -Dtarget=${{ matrix.target }} \
+                    -Doptimize=ReleaseSafe \
+                    --prefix dist/${{ matrix.target }}
+          ls -lh dist/${{ matrix.target }}/bin/ntripcaster
+
+      # ── Raw binary (strip "v" prefix, keep arch in name) ──────────────────
+      - name: Prepare binary artifact
+        run: |
+          cp dist/${{ matrix.target }}/bin/ntripcaster \
+             ntripcaster-${{ steps.version.outputs.VERSION }}-${{ matrix.binary_suffix }}
+
+      # ── .deb ─────────────────────────────────────────────────────────────────
+      - name: Build .deb
+        run: |
+          packaging/build-deb.sh \
+            dist/${{ matrix.target }}/bin/ntripcaster \
+            ${{ steps.version.outputs.VERSION }} \
+            ${{ matrix.deb_arch }}
+
+      # ── .rpm ─────────────────────────────────────────────────────────────────
+      - name: Build .rpm
+        run: |
+          packaging/build-rpm.sh \
+            dist/${{ matrix.target }}/bin/ntripcaster \
+            ${{ steps.version.outputs.VERSION }} \
+            ${{ matrix.rpm_arch }}
+
+      # ── .ipk (OpenWRT) ───────────────────────────────────────────────────────
+      - name: Build .ipk
+        run: |
+          packaging/build-opkg.sh \
+            dist/${{ matrix.target }}/bin/ntripcaster \
+            ${{ steps.version.outputs.VERSION }} \
+            ${{ matrix.opkg_arch }}
+
+      # ── Upload to GitHub Release ──────────────────────────────────────────────
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
+          files: |
+            ntripcaster-${{ steps.version.outputs.VERSION }}-${{ matrix.binary_suffix }}
+            ntripcaster_${{ steps.version.outputs.VERSION }}_${{ matrix.deb_arch }}.deb
+            ntripcaster-${{ steps.version.outputs.VERSION }}-1.${{ matrix.rpm_arch }}.rpm
+            ntripcaster_${{ steps.version.outputs.VERSION }}_${{ matrix.opkg_arch }}.ipk
+
+  # ── Run tests before releasing (gate) ────────────────────────────────────────
+  test-gate:
+    name: "Test gate"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.14.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Run all tests
+        run: zig build test
+
+      - name: Run interop tests
+        run: bash tests/test_interop.sh
+
+  # ── Create GitHub Release (after all builds pass) ────────────────────────────
+  release-note:
+    name: "Create release"
+    needs: [build, test-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "ntripcaster ${{ github.ref_name }}"
+          body: |
+            ## ntripcaster ${{ steps.version.outputs.VERSION }}
+
+            Zero-dependency NTRIP v1 Caster — Zig rewrite of BKG NtripCaster 0.1.5.
+
+            ### Install
+
+            **Debian / Ubuntu (x86_64):**
+            ```bash
+            wget https://github.com/yasunorioi/ntripcaster/releases/download/${{ github.ref_name }}/ntripcaster_${{ steps.version.outputs.VERSION }}_amd64.deb
+            sudo dpkg -i ntripcaster_${{ steps.version.outputs.VERSION }}_amd64.deb
+            sudo systemctl enable --now ntripcaster
+            ```
+
+            **RHEL / Fedora (x86_64):**
+            ```bash
+            sudo rpm -ivh ntripcaster-${{ steps.version.outputs.VERSION }}-1.x86_64.rpm
+            sudo systemctl enable --now ntripcaster
+            ```
+
+            **OpenWRT (MIPS):**
+            ```bash
+            opkg install ntripcaster_${{ steps.version.outputs.VERSION }}_mipsel_24kc.ipk
+            ```
+
+            **Static binary (any Linux):**
+            ```bash
+            wget https://github.com/yasunorioi/ntripcaster/releases/download/${{ github.ref_name }}/ntripcaster-${{ steps.version.outputs.VERSION }}-x86_64-linux
+            chmod +x ntripcaster-${{ steps.version.outputs.VERSION }}-x86_64-linux
+            sudo mv ntripcaster-${{ steps.version.outputs.VERSION }}-x86_64-linux /usr/local/bin/ntripcaster
+            ```
+
+            ### Assets
+
+            | File | Platform |
+            |------|----------|
+            | `ntripcaster-*-x86_64-linux` | Linux x86_64 (static) |
+            | `ntripcaster-*-aarch64-linux` | Linux ARM64 / RPi4 (static) |
+            | `ntripcaster-*-armv7-linux` | Linux ARMv7 / RPi2-3 (static) |
+            | `ntripcaster-*-mipsel-linux` | Linux MIPS LE / OpenWRT (static) |
+            | `ntripcaster_*_amd64.deb` | Debian/Ubuntu x86_64 |
+            | `ntripcaster_*_arm64.deb` | Debian/Ubuntu ARM64 |
+            | `ntripcaster_*_armhf.deb` | Debian/Ubuntu ARMhf |
+            | `ntripcaster_*_mipsel.deb` | Debian MIPS LE |
+            | `ntripcaster-*-1.x86_64.rpm` | RHEL/Fedora x86_64 |
+            | `ntripcaster-*-1.aarch64.rpm` | RHEL/Fedora ARM64 |
+            | `ntripcaster_*_x86_64.ipk` | OpenWRT x86_64 |
+            | `ntripcaster_*_mipsel_24kc.ipk` | OpenWRT MIPS (24Kc) |
+            | `ntripcaster_*_aarch64_generic.ipk` | OpenWRT ARM64 |
+            | `ntripcaster_*_arm_cortex-a7_neon-vfpv4.ipk` | OpenWRT ARMv7 |
+
+            ### Changelog
+            See [CHANGELOG.md](https://github.com/yasunorioi/ntripcaster/blob/master/CHANGELOG.md) for details.
+          draft: false
+          prerelease: false

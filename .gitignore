@@ -40,6 +40,19 @@
 **/.deps/
 *.log
 
+# Zig build artefacts
+zig-out/
+zig-out-*/
+.zig-cache/
+
+# Packaging temp dirs and output files
+.pkg-tmp/
+.rpm-tmp/
+.ipk-tmp/
+*.deb
+*.rpm
+*.ipk
+
 # Build outputs (generated Makefiles, binaries, conf dist)
 ntripcaster0.1.5/Makefile
 ntripcaster0.1.5/src/Makefile

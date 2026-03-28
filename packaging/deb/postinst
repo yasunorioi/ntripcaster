@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    # Create dedicated unprivileged user if not present
+    if ! getent passwd ntripcaster >/dev/null 2>&1; then
+      adduser --system --no-create-home --group \
+              --home /var/empty --shell /usr/sbin/nologin \
+              ntripcaster
+    fi
+    # Ensure log directory exists
+    mkdir -p /var/log/ntripcaster
+    chown ntripcaster:ntripcaster /var/log/ntripcaster
+
+    # Ensure config directory exists (do not overwrite existing config)
+    mkdir -p /etc/ntripcaster
+    if [ ! -f /etc/ntripcaster/ntripcaster.conf ]; then
+      cp /usr/share/doc/ntripcaster/ntripcaster.conf.example \
+         /etc/ntripcaster/ntripcaster.conf
+    fi
+    chown -R ntripcaster:ntripcaster /etc/ntripcaster
+
+    # Enable and start the service if systemctl is available
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-system-running 2>/dev/null | grep -qE '^(running|degraded)$'; then
+      systemctl daemon-reload
+      systemctl enable ntripcaster.service || true
+    fi
+    ;;
+esac
+
+exit 0

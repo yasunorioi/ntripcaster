@@ -1,0 +1,11 @@
+Package: ntripcaster
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Yasunori Oi <yasunori@example.com>
+Depends:
+Section: net
+Priority: optional
+Homepage: https://github.com/yasunorioi/ntripcaster
+Description: NTRIP Caster for OpenWRT — GNSS RTK correction data server
+ Zero-dependency static binary. Streams RTCM3 from base stations to rovers.
+ Compatible with u-blox ZED-F9P, Trimble, Leica, and any NTRIP v1 client.

@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main"]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "legacy/**"
+  pull_request:
+    branches: ["master", "main"]
+
+jobs:
+  test:
+    name: "zig build test (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.14.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Build (host target)
+        run: zig build -Doptimize=Debug
+
+      - name: Run unit + integration tests
+        run: zig build test
+
+      - name: Run interop shell tests (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          which nc xxd curl
+          bash tests/test_interop.sh
+
+  cross-compile:
+    name: "Cross-compile ${{ matrix.target }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-linux-musl
+          - aarch64-linux-musl
+          - arm-linux-musleabihf
+          - mipsel-linux-musl
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.14.0
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.14.0"
+
+      - name: Cross-compile ${{ matrix.target }}
+        run: |
+          zig build -Dtarget=${{ matrix.target }} \
+                    -Doptimize=ReleaseSafe \
+                    --prefix dist/${{ matrix.target }}
+          file dist/${{ matrix.target }}/bin/ntripcaster

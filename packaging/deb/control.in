@@ -1,0 +1,16 @@
+Package: ntripcaster
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Yasunori Oi <yasunori@example.com>
+Depends:
+Recommends: systemd
+Section: net
+Priority: optional
+Homepage: https://github.com/yasunorioi/ntripcaster
+Description: NTRIP Caster — GNSS real-time data streaming server (Zig rewrite)
+ A modern, zero-dependency rewrite of the BKG NtripCaster 0.1.5 in Zig.
+ Streams RTCM3 correction data from base stations to rover clients over
+ the NTRIP v1 protocol. Statically linked; no libc required.
+ .
+ Original C implementation by BKG (Federal Agency for Cartography and
+ Geodesy, Germany). Zig rewrite by Yasunori Oi.
