@@ -59,7 +59,7 @@ pub fn handleSource(
         // 全クライアントが clientLoop を抜けるまで待機（最大 2 秒）
         var waited: u32 = 0;
         while (src.client_count.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
         src.destroy();
     }

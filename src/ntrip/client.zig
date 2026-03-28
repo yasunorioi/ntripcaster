@@ -88,7 +88,7 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source) void {
             read_pos = r.next_pos;
         } else {
             // データ待ち: CPU を占有しないよう短時間スリープ
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
     }
 }

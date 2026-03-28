@@ -104,7 +104,7 @@ fn parseMountLine(
     const users_str = line[colon_pos.? + 1 ..];
 
     // ユーザーリストを "," で分割し各 "user:pass" をパース
-    var users = std.ArrayList(User).init(allocator);
+    var users = std.ArrayList(User){};
     var cred_iter = std.mem.splitScalar(u8, users_str, ',');
     while (cred_iter.next()) |cred| {
         const cred_trimmed = std.mem.trim(u8, cred, " \t");
@@ -115,14 +115,14 @@ fn parseMountLine(
 
         const user_name = try allocator.dupe(u8, cred_trimmed[0..sep]);
         const user_pass = try allocator.dupe(u8, cred_trimmed[sep + 1 ..]);
-        try users.append(.{ .name = user_name, .password = user_pass });
+        try users.append(allocator, .{ .name = user_name, .password = user_pass });
     }
 
     return .{
         .mount = mount,
         .auth = .{
             .open = false,
-            .users = try users.toOwnedSlice(),
+            .users = try users.toOwnedSlice(allocator),
         },
     };
 }

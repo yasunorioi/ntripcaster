@@ -86,7 +86,7 @@ pub const ServerState = struct {
         // ハンドラースレッドが全て終了するまで待機（最大2秒）
         var waited: u32 = 0;
         while (self.active_handlers.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
-            std.time.sleep(10 * std.time.ns_per_ms);
+            std.Thread.sleep(10 * std.time.ns_per_ms);
         }
         self.source_lock.lock();
         defer self.source_lock.unlock();

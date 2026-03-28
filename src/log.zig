@@ -35,7 +35,7 @@ pub const Logger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.stderr) std.io.getStdErr().writeAll(line) catch {};
+        if (self.stderr) std.fs.File.stderr().writeAll(line) catch {};
         if (self.file) |f| f.writeAll(line) catch {};
     }
 

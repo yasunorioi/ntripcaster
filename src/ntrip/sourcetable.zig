@@ -29,17 +29,17 @@ pub fn buildResponse(
     _ = server_name; // Server ヘッダーには CASTER_VERSION のみ埋め込む
 
     // ボディ = sourcetable.dat 内容 + "ENDSOURCETABLE\r\n"
-    var full_body = std.ArrayList(u8).init(allocator);
-    defer full_body.deinit();
+    var full_body = std.ArrayList(u8){};
+    defer full_body.deinit(allocator);
 
     if (body.len > 0) {
-        try full_body.appendSlice(body);
+        try full_body.appendSlice(allocator, body);
         // 末尾が改行でなければ CRLF を補完
         if (!std.mem.endsWith(u8, body, "\n")) {
-            try full_body.appendSlice("\r\n");
+            try full_body.appendSlice(allocator, "\r\n");
         }
     }
-    try full_body.appendSlice("ENDSOURCETABLE\r\n");
+    try full_body.appendSlice(allocator, "ENDSOURCETABLE\r\n");
 
     // ヘッダー + ボディを一つの文字列に結合
     return std.fmt.allocPrint(

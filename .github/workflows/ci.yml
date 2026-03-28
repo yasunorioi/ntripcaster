@@ -25,7 +25,7 @@ jobs:
       - name: Install Zig 0.14.0
         uses: mlugg/setup-zig@v1
         with:
-          version: "0.14.0"
+          version: "0.15.2"
 
       - name: Build (host target)
         run: zig build -Doptimize=Debug
@@ -57,7 +57,7 @@ jobs:
       - name: Install Zig 0.14.0
         uses: mlugg/setup-zig@v1
         with:
-          version: "0.14.0"
+          version: "0.15.2"
 
       - name: Cross-compile ${{ matrix.target }}
         run: |

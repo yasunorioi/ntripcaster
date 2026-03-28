@@ -44,7 +44,7 @@ fn reqResp(port: u16, request: []const u8, resp_buf: []u8) !usize {
     var conn = try std.net.tcpConnectToAddress(addr);
     defer conn.close();
     try conn.writeAll(request);
-    std.time.sleep(60 * std.time.ns_per_ms);
+    std.Thread.sleep(60 * std.time.ns_per_ms);
     return conn.read(resp_buf);
 }
 
@@ -255,7 +255,7 @@ test "source to client RTCM relay" {
     // ── RTCMデータ送信 → 受信確認 ─────────────────────────────────────────────
     const rtcm: []const u8 = &.{ 0xD3, 0x00, 0x04, 0xAA, 0xBB, 0xCC, 0xDD };
     try src.writeAll(rtcm);
-    std.time.sleep(80 * std.time.ns_per_ms);
+    std.Thread.sleep(80 * std.time.ns_per_ms);
 
     var data: [64]u8 = undefined;
     const data_n = try cli.read(&data);
@@ -292,7 +292,7 @@ test "open mount allows unauthenticated client" {
     var cli = try std.net.tcpConnectToAddress(addr);
     defer cli.close();
     try cli.writeAll("GET /OPEN HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n");
-    std.time.sleep(60 * std.time.ns_per_ms);
+    std.Thread.sleep(60 * std.time.ns_per_ms);
 
     var resp: [32]u8 = undefined;
     const n = try cli.read(&resp);
