@@ -19,7 +19,7 @@ NTRIP v1 caster — Zig rewrite of the BKG reference implementation.
 
 ## Build
 
-Requires **Zig 0.14.0**.
+Requires **Zig 0.15.x** (tested with 0.15.2).
 
 ```bash
 # ネイティブビルド

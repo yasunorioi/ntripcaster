@@ -4,9 +4,15 @@ All notable changes to this project are documented here.
 
 ---
 
+## [0.2.1] — 2026-03-28 — Zig 0.15.2 migration
+
+- Migrate all source to Zig 0.15.2 API (ArrayList, std.fs.File, std.Thread)
+- Update CI/CD workflows to Zig 0.15.2
+- build.zig: adopt .root_module pattern (0.15 style)
+
 ## [0.2.0] — 2026-03-28 — Zig rewrite
 
-Complete rewrite of the BKG C implementation in Zig 0.14.0.
+Complete rewrite of the BKG C implementation in Zig.
 Original C source preserved in `/legacy/` without modification.
 
 ### Phase 2 — Zig フルリライト (cmd_463)
