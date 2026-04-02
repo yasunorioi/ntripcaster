@@ -39,14 +39,21 @@ pub fn handleSource(
         }
     }
 
-    // 3. Source オブジェクト作成
+    // 3. ソース数上限チェック
+    if (state.sourceCount() >= state.config.max_sources) {
+        stream.writeAll("ERROR - Too Many Sources\r\n") catch {};
+        state.logger.warn("source rejected: max_sources ({d}) reached", .{state.config.max_sources});
+        return;
+    }
+
+    // 4. Source オブジェクト作成
     const src = server.Source.create(state.alloc, login.mount) catch |err| {
         stream.writeAll("ERROR - Internal Error\r\n") catch {};
         state.logger.err("Source.create failed: {}", .{err});
         return;
     };
 
-    // 4. マウント登録
+    // 5. マウント登録
     state.registerSource(src) catch {
         src.destroy();
         stream.writeAll("ERROR - Mount already in use\r\n") catch {};

@@ -128,6 +128,13 @@ pub const ServerState = struct {
         defer self.source_lock.unlock();
         return self.sources.get(mount);
     }
+
+    /// 現在登録中のソース数を返す（スレッドセーフ）。
+    pub fn sourceCount(self: *ServerState) u32 {
+        self.source_lock.lock();
+        defer self.source_lock.unlock();
+        return @intCast(self.sources.count());
+    }
 };
 
 // ── 接続ディスパッチ ──────────────────────────────────────────────────────────
@@ -184,6 +191,13 @@ fn handleConnection(args: ConnArgs) void {
     _ = args.state.active_handlers.fetchAdd(1, .seq_cst);
     defer _ = args.state.active_handlers.fetchSub(1, .seq_cst);
     defer args.stream.close();
+
+    // 接続数上限チェック
+    if (args.state.active_handlers.load(.seq_cst) > args.state.config.max_clients) {
+        args.stream.writeAll("ERROR - Too Many Clients\r\n") catch {};
+        args.state.logger.warn("connection rejected: max_clients ({d}) exceeded", .{args.state.config.max_clients});
+        return;
+    }
 
     const source_mod = @import("ntrip/source.zig");
     const client_mod = @import("ntrip/client.zig");

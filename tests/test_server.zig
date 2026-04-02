@@ -298,3 +298,121 @@ test "open mount allows unauthenticated client" {
     const n = try cli.read(&resp);
     try std.testing.expect(std.mem.startsWith(u8, resp[0..n], "ICY 200 OK"));
 }
+
+// ── 接続数制限 ────────────────────────────────────────────────────────────────
+
+test "connection rejected when max_clients exceeded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    state.config.max_clients = 1; // 上限1
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    // 1つ目: SOURCE接続で active_handlers = 1
+    var src = try std.net.tcpConnectToAddress(addr);
+    defer src.close();
+    try src.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok: [8]u8 = undefined;
+    _ = try src.read(&ok); // "OK\r\n"
+
+    // 2つ目: max_clients(1)超過 → "ERROR - Too Many Clients"
+    var buf: [64]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "GET / HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "ERROR - Too Many Clients"));
+}
+
+test "client rejected when max_clients_per_source exceeded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    state.config.max_clients_per_source = 1; // 上限1
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    // ソース接続
+    var src = try std.net.tcpConnectToAddress(addr);
+    defer src.close();
+    try src.writeAll("SOURCE testpass /OPEN\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok: [8]u8 = undefined;
+    _ = try src.read(&ok);
+
+    // クライアント1: ICY 200 OK 受信 → client_count = 1 になる
+    var cli1 = try std.net.tcpConnectToAddress(addr);
+    defer cli1.close();
+    try cli1.writeAll("GET /OPEN HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n");
+    var icy: [32]u8 = undefined;
+    const icy_n = try cli1.read(&icy);
+    try std.testing.expect(std.mem.startsWith(u8, icy[0..icy_n], "ICY 200 OK"));
+
+    // client_count が 1 になるまで待つ
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+
+    // クライアント2: max_clients_per_source(1)超過 → 503
+    var buf: [64]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "GET /OPEN HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "HTTP/1.0 503"));
+}
+
+test "source rejected when max_sources exceeded" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    state.config.max_sources = 1; // 上限1
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    // ソース1: OK
+    var src1 = try std.net.tcpConnectToAddress(addr);
+    defer src1.close();
+    try src1.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok1: [8]u8 = undefined;
+    _ = try src1.read(&ok1);
+
+    // ソース2: max_sources(1)超過 → "ERROR - Too Many Sources"
+    var buf: [64]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "SOURCE testpass /OTHER\r\nSource-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "ERROR - Too Many Sources"));
+}

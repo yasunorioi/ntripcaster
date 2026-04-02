@@ -58,7 +58,14 @@ pub fn handleClient(
         return;
     }
 
-    // 3. ICY 200 OK 応答
+    // 3. ソースあたりクライアント数上限チェック
+    if (src.client_count.load(.seq_cst) >= state.config.max_clients_per_source) {
+        stream.writeAll("HTTP/1.0 503 Service Unavailable\r\n\r\n") catch {};
+        state.logger.warn("client rejected: max_clients_per_source ({d}) reached for mount {s}", .{ state.config.max_clients_per_source, get.mount });
+        return;
+    }
+
+    // 4. ICY 200 OK 応答
     stream.writeAll("ICY 200 OK\r\n\r\n") catch return;
     state.logger.info("client connected: mount={s}", .{get.mount});
 
