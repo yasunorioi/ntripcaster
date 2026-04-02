@@ -19,16 +19,19 @@ pub const CASTER_VERSION = "0.2.0";
 ///
 /// `body`: sourcetable.dat の内容（空文字列可）。
 /// `server_name`: Server ヘッダーに埋め込むサーバー名。
+/// `dynamic_mounts`: 現在接続中のソースマウント名スライス。
+///   各エントリを `STR;{mount};;;;;;;;;;;;;N;N;0;;\r\n` 形式で body 末尾に追記する。
 ///
 /// 返却値: 呼び出し元が `allocator.free()` で解放すること。
 pub fn buildResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     server_name: []const u8,
+    dynamic_mounts: []const []const u8,
 ) ![]u8 {
     _ = server_name; // Server ヘッダーには CASTER_VERSION のみ埋め込む
 
-    // ボディ = sourcetable.dat 内容 + "ENDSOURCETABLE\r\n"
+    // ボディ = sourcetable.dat 内容 + 動的STR行 + "ENDSOURCETABLE\r\n"
     var full_body = std.ArrayList(u8){};
     defer full_body.deinit(allocator);
 
@@ -39,6 +42,14 @@ pub fn buildResponse(
             try full_body.appendSlice(allocator, "\r\n");
         }
     }
+
+    // 動的ソースの STR 行を追記
+    for (dynamic_mounts) |mount| {
+        try full_body.appendSlice(allocator, "STR;");
+        try full_body.appendSlice(allocator, mount);
+        try full_body.appendSlice(allocator, ";;;;;;;;;;;;;N;N;0;;\r\n");
+    }
+
     try full_body.appendSlice(allocator, "ENDSOURCETABLE\r\n");
 
     // ヘッダー + ボディを一つの文字列に結合

@@ -163,9 +163,10 @@ fn sendBadRequest(stream: std.net.Stream) void {
 fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState) void {
     var arena = std.heap.ArenaAllocator.init(state.alloc);
     defer arena.deinit();
+    const alloc = arena.allocator();
 
     const st_path = std.fmt.allocPrint(
-        arena.allocator(),
+        alloc,
         "{s}/sourcetable.dat",
         .{state.conf_dir},
     ) catch {
@@ -173,12 +174,25 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState) void {
         return;
     };
 
-    const maybe_body = sourcetable_mod.readFile(arena.allocator(), st_path) catch null;
+    const maybe_body = sourcetable_mod.readFile(alloc, st_path) catch null;
     const body = maybe_body orelse "";
+
+    // 接続中ソースのマウント名を列挙（ロック下で収集）
+    var mounts = std.ArrayList([]const u8){};
+    {
+        state.source_lock.lock();
+        defer state.source_lock.unlock();
+        var it = state.sources.keyIterator();
+        while (it.next()) |k| {
+            mounts.append(alloc, k.*) catch {};
+        }
+    }
+
     const resp = sourcetable_mod.buildResponse(
-        arena.allocator(),
+        alloc,
         body,
         state.config.server_name,
+        mounts.items,
     ) catch {
         sendBadRequest(stream);
         return;
