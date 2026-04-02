@@ -2,12 +2,14 @@
 //!
 //! 原典 source.c の source_login() / source_func() / add_chunk() を Zig で再実装。
 //! SOURCE コマンドで接続した基準局からRTCMデータを受信し、リングバッファに格納する。
+//! 受信データを並行して RTCM3 フレーム解析し、メッセージタイプ統計を Source に蓄積する。
 
 const std = @import("std");
 const server = @import("../server.zig");
 const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
+const rtcm3 = @import("rtcm3.zig");
 
 /// ソース接続のエントリポイント。
 ///
@@ -81,14 +83,64 @@ pub fn handleSource(
     state.logger.info("source disconnected: mount={s}", .{login.mount});
 }
 
+/// メッセージタイプを Source に記録する（スレッドセーフ）。
+fn recordMsgType(src: *server.Source, msg_type: u16) void {
+    src.msg_lock.lock();
+    defer src.msg_lock.unlock();
+    const gop = src.msg_types.getOrPut(src.alloc, msg_type) catch return;
+    if (gop.found_existing) {
+        gop.value_ptr.* += 1;
+    } else {
+        gop.value_ptr.* = 1;
+    }
+}
+
 /// RTCMデータを受信してリングバッファに書き込むループ。
+/// 並行して RTCM3 フレーム解析を行い、メッセージタイプ統計を蓄積する。
 fn sourceLoop(stream: std.net.Stream, src: *server.Source) void {
     var buf: [relay.RingBuffer.CHUNK_SIZE]u8 = undefined;
+    // RTCM3 フレーム解析用バッファ（チャンク跨ぎ対応：最大 2 チャンク分）
+    var parse_buf: [relay.RingBuffer.CHUNK_SIZE * 2]u8 = undefined;
+    var parse_len: usize = 0;
+
     while (true) {
         const n = stream.read(&buf) catch break;
         if (n == 0) break; // 接続閉鎖
+
+        // リングバッファに透過転送（既存動作）
         src.ring.writeChunk(buf[0..n]);
+
+        // parse_buf に追記（溢れ防止）
+        const chunk = buf[0..n];
+        if (parse_len + chunk.len <= parse_buf.len) {
+            @memcpy(parse_buf[parse_len .. parse_len + chunk.len], chunk);
+            parse_len += chunk.len;
+        } else {
+            // バッファ溢れ: 新データで先頭から上書き
+            const copy_len = @min(chunk.len, parse_buf.len);
+            @memcpy(parse_buf[0..copy_len], chunk[0..copy_len]);
+            parse_len = copy_len;
+        }
+
+        // RTCM3 フレームスキャン
+        const scan = rtcm3.scanFrames(parse_buf[0..parse_len]);
+
+        if (scan.count > 0 and !src.rtcm_detected) {
+            src.rtcm_detected = true;
+        }
+
+        for (scan.msg_types[0..scan.count]) |mt| {
+            recordMsgType(src, mt);
+        }
+
+        // 消費済みバイトをシフト（重なり対応のため copyForwards を使用）
+        const remaining = parse_len - scan.consumed;
+        if (remaining > 0 and scan.consumed > 0) {
+            std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[scan.consumed..parse_len]);
+        }
+        parse_len = remaining;
     }
+
     // ソース切断をクライアントループに通知
     src.active.store(false, .seq_cst);
 }

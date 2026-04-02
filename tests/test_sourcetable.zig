@@ -141,12 +141,12 @@ test "buildResponse: dynamic_mounts empty produces no extra STR rows" {
     try std.testing.expectEqualStrings("ENDSOURCETABLE\r\n", body);
 }
 
-test "buildResponse: dynamic_mounts single mount appears as STR row" {
+test "buildResponse: dynamic source single mount appears as STR row" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const mounts = [_][]const u8{"LIVE0"};
-    const resp = try sourcetable.buildResponse(arena.allocator(), "", "localhost", &mounts);
+    const sources = [_]sourcetable.SourceEntry{.{ .mount = "LIVE0" }};
+    const resp = try sourcetable.buildResponse(arena.allocator(), "", "localhost", &sources);
 
     // STR;LIVE0; が含まれる
     try std.testing.expect(std.mem.indexOf(u8, resp, "STR;LIVE0;") != null);
@@ -156,13 +156,31 @@ test "buildResponse: dynamic_mounts single mount appears as STR row" {
     try std.testing.expect(str_pos < end_pos);
 }
 
-test "buildResponse: static body and dynamic mounts both appear" {
+test "buildResponse: dynamic source with format and format_details" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sources = [_]sourcetable.SourceEntry{.{
+        .mount = "RTCM0",
+        .format = "RTCM 3.2",
+        .format_details = "1005(10),1077(1)",
+    }};
+    const resp = try sourcetable.buildResponse(arena.allocator(), "", "localhost", &sources);
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "RTCM 3.2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "1005(10),1077(1)") != null);
+}
+
+test "buildResponse: static body and dynamic sources both appear" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
     const static_body = "CAS;localhost;2101;NtripCaster;0;DEU;0.00;0.00;0;0;misc;\r\n";
-    const mounts = [_][]const u8{ "RTCM1", "RTCM2" };
-    const resp = try sourcetable.buildResponse(arena.allocator(), static_body, "localhost", &mounts);
+    const sources = [_]sourcetable.SourceEntry{
+        .{ .mount = "RTCM1", .format = "RTCM 3.2", .format_details = "1005(1)" },
+        .{ .mount = "RTCM2" },
+    };
+    const resp = try sourcetable.buildResponse(arena.allocator(), static_body, "localhost", &sources);
 
     // 静的エントリ確認
     try std.testing.expect(std.mem.indexOf(u8, resp, "CAS;localhost") != null);

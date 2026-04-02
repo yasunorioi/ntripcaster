@@ -15,19 +15,29 @@ const std = @import("std");
 
 pub const CASTER_VERSION = "0.2.0";
 
+/// 動的ソースの STR 行生成に使う情報
+pub const SourceEntry = struct {
+    mount: []const u8,
+    /// ストリーム形式（例: "RTCM 3.2"）。未検出の場合は空文字列。
+    format: []const u8 = "",
+    /// フォーマット詳細（例: "1005(10),1077(1)"）。未検出の場合は空文字列。
+    format_details: []const u8 = "",
+};
+
 /// "SOURCETABLE 200 OK" レスポンス全体を `allocator` 上に生成する。
 ///
 /// `body`: sourcetable.dat の内容（空文字列可）。
 /// `server_name`: Server ヘッダーに埋め込むサーバー名。
-/// `dynamic_mounts`: 現在接続中のソースマウント名スライス。
-///   各エントリを `STR;{mount};;;;;;;;;;;;;N;N;0;;\r\n` 形式で body 末尾に追記する。
+/// `dynamic_sources`: 現在接続中のソース情報スライス。
+///   各エントリを NTRIP STR 行として body 末尾に追記する。
+///   STR フォーマット: STR;mount;mount;format;format_details;;;;;;;;;N;N;0;;
 ///
 /// 返却値: 呼び出し元が `allocator.free()` で解放すること。
 pub fn buildResponse(
     allocator: std.mem.Allocator,
     body: []const u8,
     server_name: []const u8,
-    dynamic_mounts: []const []const u8,
+    dynamic_sources: []const SourceEntry,
 ) ![]u8 {
     _ = server_name; // Server ヘッダーには CASTER_VERSION のみ埋め込む
 
@@ -44,10 +54,19 @@ pub fn buildResponse(
     }
 
     // 動的ソースの STR 行を追記
-    for (dynamic_mounts) |mount| {
+    // NTRIP STR フィールド順:
+    //   STR;mount;identifier;format;format-details;carrier;nav-sys;network;
+    //   country;lat;lon;NMEA;solution;generator;compr-encryp;auth;fee;bitrate;misc;
+    for (dynamic_sources) |entry| {
         try full_body.appendSlice(allocator, "STR;");
-        try full_body.appendSlice(allocator, mount);
-        try full_body.appendSlice(allocator, ";;;;;;;;;;;;;N;N;0;;\r\n");
+        try full_body.appendSlice(allocator, entry.mount);
+        try full_body.appendSlice(allocator, ";");
+        try full_body.appendSlice(allocator, entry.mount); // identifier = mount
+        try full_body.appendSlice(allocator, ";");
+        try full_body.appendSlice(allocator, entry.format);
+        try full_body.appendSlice(allocator, ";");
+        try full_body.appendSlice(allocator, entry.format_details);
+        try full_body.appendSlice(allocator, ";;;;;;;;;N;N;0;;\r\n");
     }
 
     try full_body.appendSlice(allocator, "ENDSOURCETABLE\r\n");

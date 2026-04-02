@@ -22,6 +22,12 @@ pub const Source = struct {
     /// 現在接続中のクライアント数。destroy() はゼロになるまで待機する
     client_count: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
+    /// RTCM3 ストリームを検出したら true（sourceLoop が設定）
+    rtcm_detected: bool,
+    /// 観測済み RTCM3 メッセージタイプ → カウント（sourceLoop が更新）
+    msg_types: std.AutoHashMapUnmanaged(u16, u32),
+    /// msg_types へのアクセスを保護するロック
+    msg_lock: std.Thread.Mutex,
 
     pub fn create(alloc: std.mem.Allocator, mount: []const u8) !*Source {
         const s = try alloc.create(Source);
@@ -31,12 +37,16 @@ pub const Source = struct {
             .active = std.atomic.Value(bool).init(true),
             .client_count = std.atomic.Value(u32).init(0),
             .alloc = alloc,
+            .rtcm_detected = false,
+            .msg_types = .{},
+            .msg_lock = .{},
         };
         return s;
     }
 
     pub fn destroy(self: *Source) void {
         self.active.store(false, .seq_cst);
+        self.msg_types.deinit(self.alloc);
         self.alloc.free(self.mount);
         self.alloc.destroy(self);
     }
@@ -177,14 +187,40 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState) void {
     const maybe_body = sourcetable_mod.readFile(alloc, st_path) catch null;
     const body = maybe_body orelse "";
 
-    // 接続中ソースのマウント名を列挙（ロック下で収集）
-    var mounts = std.ArrayList([]const u8){};
+    // 接続中ソースの SourceEntry を収集（source_lock → msg_lock 順でロック）
+    var entries = std.ArrayList(sourcetable_mod.SourceEntry){};
     {
         state.source_lock.lock();
         defer state.source_lock.unlock();
-        var it = state.sources.keyIterator();
-        while (it.next()) |k| {
-            mounts.append(alloc, k.*) catch {};
+        var it = state.sources.valueIterator();
+        while (it.next()) |src_ptr| {
+            const src = src_ptr.*;
+            const fmt: []const u8 = if (src.rtcm_detected) "RTCM 3.2" else "";
+
+            // format_details: "{msg_type}({count}),..." 形式
+            var details = std.ArrayList(u8){};
+            {
+                src.msg_lock.lock();
+                defer src.msg_lock.unlock();
+                var mt_it = src.msg_types.iterator();
+                var first = true;
+                while (mt_it.next()) |kv| {
+                    if (!first) details.append(alloc, ',') catch {};
+                    first = false;
+                    const part = std.fmt.allocPrint(
+                        alloc,
+                        "{d}({d})",
+                        .{ kv.key_ptr.*, kv.value_ptr.* },
+                    ) catch continue;
+                    details.appendSlice(alloc, part) catch {};
+                }
+            }
+
+            entries.append(alloc, .{
+                .mount = src.mount,
+                .format = fmt,
+                .format_details = details.items,
+            }) catch {};
         }
     }
 
@@ -192,7 +228,7 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState) void {
         alloc,
         body,
         state.config.server_name,
-        mounts.items,
+        entries.items,
     ) catch {
         sendBadRequest(stream);
         return;
