@@ -11,6 +11,7 @@ test {
     _ = @import("test_protocol.zig");
     _ = @import("test_sourcetable.zig");
     _ = @import("test_rtcm3.zig");
+    _ = @import("test_fkp.zig");
     _ = @import("test_relay.zig");
     _ = @import("test_server.zig");
 }

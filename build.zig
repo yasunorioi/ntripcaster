@@ -56,6 +56,21 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(unit_tests).step,
     );
 
+    // ── FKP Demo (rtk2go実証クライアント) ─────────────────────────────
+    const fkp_demo = b.addExecutable(.{
+        .name = "fkp-demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fkp/demo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "ntripcaster", .module = ntripcaster_mod },
+            },
+        }),
+    });
+    b.installArtifact(fkp_demo);
+    b.step("fkp-demo", "Build FKP demo client").dependOn(&b.addRunArtifact(fkp_demo).step);
+
     // ── Integration tests (TCP接続テスト) ──────────────────────────────────
     const int_tests = b.addTest(.{
         .root_module = b.createModule(.{

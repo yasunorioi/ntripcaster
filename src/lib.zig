@@ -10,3 +10,7 @@ pub const rtcm3 = @import("ntrip/rtcm3.zig");
 pub const relay = @import("relay/engine.zig");
 pub const log_mod = @import("log.zig");
 pub const server_mod = @import("server.zig");
+pub const fkp_bits = @import("fkp/bits.zig");
+pub const fkp_msm7 = @import("fkp/msm7.zig");
+pub const fkp_engine = @import("fkp/engine.zig");
+pub const fkp_type59 = @import("fkp/type59.zig");
