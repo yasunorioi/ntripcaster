@@ -13,7 +13,11 @@ NTRIP v1 caster — Zig rewrite of the BKG reference implementation.
 - NTRIP v1 server / source / client relay
 - HTTP Basic authentication (sourcetable, per-mountpoint)
 - Ring-buffer per source stream (zero-copy relay to multiple clients)
-- Cross-compile ready: `x86_64-linux-musl`, `aarch64-linux-musl`
+- Connection limit enforcement (max_clients / max_clients_per_source / max_sources)
+- Dynamic sourcetable generation from active sources
+- RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection)
+- FKP (Flächenkorrekturparameter) computation engine for Network RTK
+- Cross-compile ready: `x86_64-linux-musl`, `aarch64-linux-musl`, `arm-linux-musleabihf`, `mipsel-linux-musl`
 - systemd service unit with hardening options
 - Single static binary — no runtime dependencies
 
@@ -80,14 +84,37 @@ sudo journalctl -u ntripcaster -f
 | 項目 | デフォルト | 説明 |
 |------|-----------|------|
 | `port` | `2101` | NTRIP caster ポート番号 |
-| `rtsp_port` | `554` | RTSP ポート（無効化可） |
 | `encoder_password` | *(設定必須)* | Source 接続パスワード |
-| `server_name` | `NtripCaster` | Sourcetable に表示する名前 |
+| `server_name` | `localhost` | サーバーホスト名 |
 | `location` | *(任意)* | サーバー設置場所 |
-| `conf_dir` | `/etc/ntripcaster/conf` | 設定ディレクトリパス |
-| `log_dir` | `/var/log/ntripcaster` | ログ出力ディレクトリ |
 | `max_clients` | `100` | 最大クライアント接続数 |
+| `max_clients_per_source` | `100` | マウントポイントあたり最大クライアント数 |
 | `max_sources` | `40` | 最大ソース接続数 |
+| `logdir` | `logs` | ログ出力ディレクトリ |
+| `logfile` | `ntripcaster.log` | ログファイル名 |
+
+### FKP 設定
+
+Network RTK の FKP (面補正パラメータ) 計算・配信機能。
+3局以上の NTRIP 基準局から搬送波位相データを取得し、FKP を計算して仮想マウントポイントとして配信する。
+
+```conf
+# FKP 有効化（デフォルト: false）
+fkp_enable true
+
+# 上流基準局（3局以上必須）
+# 書式: fkp_source host/mountpoint [user:password]
+# ポート変更時: fkp_source host:port/mountpoint [user:password]
+fkp_source rtk2go.com/nakagawa00 test@example.com:none
+fkp_source rtk2go.com/Asahikawa-HAMA test@example.com:none
+fkp_source rtk2go.com/UEMATSUDENKI-F9P test@example.com:none
+
+# FKP 配信マウントポイント名
+fkp_mountpoint /FKP_HOKKAIDO
+
+# FKP 計算間隔（秒、デフォルト: 1）
+fkp_interval 1
+```
 
 詳細は [`conf/ntripcaster.conf`](conf/ntripcaster.conf) を参照。
 
@@ -97,10 +124,13 @@ sudo journalctl -u ntripcaster -f
 Source (NTRIP source device)
   │  SOURCE /mountpoint HTTP/1.0
   ▼
-[server.zig] accept + auth/basic
+[server.zig] accept + auth/basic + connection limit check
   │
   ▼
-[ntrip/sourcetable.zig]  ← mountpoint 登録
+[ntrip/source.zig]  ← mountpoint registration + RTCM3 frame analysis
+  │
+  ▼
+[ntrip/sourcetable.zig]  ← dynamic sourcetable (active sources + format-details)
   │
   ▼
 [RingBuffer per source]  ← relay/ring_buffer.zig
@@ -108,9 +138,28 @@ Source (NTRIP source device)
   ├─▶ Client 1 (GET /mountpoint)
   ├─▶ Client 2
   └─▶ Client N
+
+FKP Engine (optional):
+  [rtk2go etc.] ──▶ [fkp/msm7.zig] ──▶ [fkp/engine.zig] ──▶ [fkp/type59.zig]
+   3+ base stations    MSM7 phase        FKP computation       RTCM Type 59
+                       extraction        (Tanaka 2003)         encoding
+                                              │
+                                              ▼
+                                     Virtual mountpoint (/FKP_*)
 ```
 
 詳細: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+## FKP Demo
+
+rtk2go.com の北海道フリー基地局3局を使った FKP 計算実証:
+
+```bash
+zig build
+./zig-out/bin/fkp-demo
+```
+
+参考文献: 田中慎治 (2003)「ネットワークRTK-GPS測位に関する研究」東京商船大学修士論文
 
 ## Legacy C Implementation
 
