@@ -380,18 +380,21 @@ test "fkp: fkp_source 0 sources disabled" {
     try std.testing.expectEqual(@as(usize, 0), cfg.fkp_sources.len);
 }
 
-test "fkp: fkp_source 2 sources (insufficient)" {
+test "fkp: fkp_source 2 sources (insufficient) emits warning" {
     var arena = testArena();
     defer arena.deinit();
 
+    // fkp_enable true + 局数 < 3 → std.log.warn が出力される（FKP inactive）。
+    // パーサーはエラーにせず 2 件をそのまま格納する。
     const content =
+        \\fkp_enable true
         \\fkp_source rtk2go.com/mount1
         \\fkp_source rtk2go.com/mount2
     ;
     var cfg = try parser.parse(arena.allocator(), content);
     defer cfg.deinit();
 
-    // パーサーは受け付ける。呼び出し元が len < 3 を判定する。
+    try std.testing.expect(cfg.fkp_enable);
     try std.testing.expectEqual(@as(usize, 2), cfg.fkp_sources.len);
 }
 

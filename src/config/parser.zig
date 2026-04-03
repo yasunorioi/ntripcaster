@@ -269,6 +269,15 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
     }
 
     config.fkp_sources = try fkp_src_list.toOwnedSlice(allocator);
+
+    // fkp_enable true なのに局数が不足（< 3）している場合は警告
+    if (config.fkp_enable and config.fkp_sources.len < 3) {
+        std.log.warn(
+            "fkp_enable is true but only {d} fkp_source(s) defined (need >= 3); FKP will be inactive",
+            .{config.fkp_sources.len},
+        );
+    }
+
     return config;
 }
 
