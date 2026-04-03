@@ -293,21 +293,31 @@ pub fn parseMsg1005(payload: []const u8) ?StationCoord {
     };
 }
 
-/// ECEF → WGS84 緯度経度 [rad, rad]（Bowring 反復法）
+/// ECEF → WGS84 緯度経度 [rad, rad]
+///
+/// 単純直接反復法（Borkowski 1989 / Bowring simple iteration）:
+///   lat_{n+1} = atan2(Z + e² · N(lat_n) · sin(lat_n),  p)
+///   N(lat) = a / sqrt(1 - e² · sin²(lat))
+///
+/// 初期値 lat_0 = atan2(Z, p)、10回で 1e-12 rad 精度に収束。
+/// 旧 Bowring 式は reduced latitude θ の更新漏れにより緯度が約18°ずれる
+/// バグがあったため、本実装に置き換え。
 pub fn ecefToLatLon(x: f64, y: f64, z: f64) [2]f64 {
     const a: f64 = 6378137.0;
-    const e2: f64 = 0.00669437999014;
-    const b: f64 = a * @sqrt(1.0 - e2);
-    const ep2: f64 = (a * a - b * b) / (b * b);
+    const e2: f64 = 0.00669437999014; // WGS-84 第1離心率の二乗
     const p = @sqrt(x * x + y * y);
     const lon = std.math.atan2(y, x);
     // 初期値（球面近似）
-    var lat = std.math.atan2(z, p * (1.0 - e2));
-    for (0..10) |_| {
+    var lat = std.math.atan2(z, p);
+    for (0..15) |_| {
         const s = @sin(lat);
-        const c = @cos(lat);
         const N = a / @sqrt(1.0 - e2 * s * s);
-        lat = std.math.atan2(z + ep2 * b * s * s * s, p - e2 * N * c * c * c);
+        const lat_new = std.math.atan2(z + e2 * N * s, p);
+        if (@abs(lat_new - lat) < 1e-12) {
+            lat = lat_new;
+            break;
+        }
+        lat = lat_new;
     }
     return .{ lat, lon };
 }

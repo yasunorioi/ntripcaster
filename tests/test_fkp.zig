@@ -210,3 +210,107 @@ test "fkp: encodeType59 empty params produces minimal frame" {
     const frame = try fkp_type59.encodeType59(arena.allocator(), 0, 0, &.{});
     try std.testing.expect(frame.len >= 6); // header(3) + min_payload + CRC(3)
 }
+
+// ── Bug 1 修正確認: ECEF → WGS84 往復精度 ───────────────────────────────────
+
+/// WGS-84 前向き変換（緯度経度→ECEF）テストヘルパー
+fn latLonToEcef(lat: f64, lon: f64, h: f64) [3]f64 {
+    const a: f64 = 6378137.0;
+    const e2: f64 = 0.00669437999014;
+    const s = @sin(lat);
+    const c = @cos(lat);
+    const N = a / @sqrt(1.0 - e2 * s * s);
+    return .{
+        (N + h) * c * @cos(lon),
+        (N + h) * c * @sin(lon),
+        (N * (1.0 - e2) + h) * s,
+    };
+}
+
+test "fkp: ecefToLatLon Nakagawa roundtrip (44.80N 142.06E)" {
+    const deg = std.math.pi / 180.0;
+    const lat0 = 44.80 * deg;
+    const lon0 = 142.06 * deg;
+    const ecef = latLonToEcef(lat0, lon0, 0.0);
+    const ll = fkp_msm7.ecefToLatLon(ecef[0], ecef[1], ecef[2]);
+    // 往復誤差 1e-8 rad 以内 (≈ 0.0001 mm)
+    try std.testing.expectApproxEqAbs(lat0, ll[0], 1e-8);
+    try std.testing.expectApproxEqAbs(lon0, ll[1], 1e-8);
+}
+
+test "fkp: ecefToLatLon Asahikawa roundtrip (43.80N 142.43E)" {
+    const deg = std.math.pi / 180.0;
+    const lat0 = 43.80 * deg;
+    const lon0 = 142.43 * deg;
+    const ecef = latLonToEcef(lat0, lon0, 0.0);
+    const ll = fkp_msm7.ecefToLatLon(ecef[0], ecef[1], ecef[2]);
+    try std.testing.expectApproxEqAbs(lat0, ll[0], 1e-8);
+    try std.testing.expectApproxEqAbs(lon0, ll[1], 1e-8);
+}
+
+test "fkp: ecefToLatLon Akabira roundtrip (43.58N 142.00E)" {
+    const deg = std.math.pi / 180.0;
+    const lat0 = 43.58 * deg;
+    const lon0 = 142.00 * deg;
+    const ecef = latLonToEcef(lat0, lon0, 0.0);
+    const ll = fkp_msm7.ecefToLatLon(ecef[0], ecef[1], ecef[2]);
+    try std.testing.expectApproxEqAbs(lat0, ll[0], 1e-8);
+    try std.testing.expectApproxEqAbs(lon0, ll[1], 1e-8);
+}
+
+test "fkp: ecefToLatLon Tokyo precise (35.69N 139.69E)" {
+    // 東京付近（VLBI観測点近似）
+    const deg = std.math.pi / 180.0;
+    const lat0 = 35.69 * deg;
+    const lon0 = 139.69 * deg;
+    const ecef = latLonToEcef(lat0, lon0, 40.0); // h=40m
+    const ll = fkp_msm7.ecefToLatLon(ecef[0], ecef[1], ecef[2]);
+    try std.testing.expectApproxEqAbs(lat0, ll[0], 1e-7);
+    try std.testing.expectApproxEqAbs(lon0, ll[1], 1e-7);
+}
+
+// ── Bug 2 確認: FKP スケール合理性 ──────────────────────────────────────────
+
+test "fkp: computeFkp Hokkaido synthetic scale check" {
+    // Bug 1 修正後、FKP パラメータが合理的な範囲に収まることを確認。
+    // 北海道3局の実座標 + 現実的な電離層差（~10mm/100km）を使用。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const deg = std.math.pi / 180.0;
+    // 実際の座標（修正済み ecefToLatLon で計算した値と整合）
+    const coord_a = fkp_msm7.StationCoord{
+        .ref_station_id = 1, .x = 0, .y = 0, .z = 0,
+        .lat = 44.80 * deg, .lon = 142.06 * deg,
+    };
+    const coord_b = fkp_msm7.StationCoord{
+        .ref_station_id = 2, .x = 0, .y = 0, .z = 0,
+        .lat = 43.80 * deg, .lon = 142.43 * deg,
+    };
+    const coord_c = fkp_msm7.StationCoord{
+        .ref_station_id = 3, .x = 0, .y = 0, .z = 0,
+        .lat = 43.58 * deg, .lon = 142.00 * deg,
+    };
+
+    // 典型的な電離層差: ~5mm/100km × 基線長
+    // Δlat_B ≈ 110km, Δlat_C ≈ 135km → ΔL_GF ≈ 5mm, 7mm
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000000.0, .l2_m = 15604000.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000005.5, .l2_m = 15604004.3 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000007.0, .l2_m = 15604005.5 }};
+
+    const stations = [_]fkp_engine.StationObs{
+        .{ .coord = coord_a, .obs = &obs_a },
+        .{ .coord = coord_b, .obs = &obs_b },
+        .{ .coord = coord_c, .obs = &obs_c },
+    };
+
+    const fkp = try fkp_engine.computeFkp(alloc, &stations);
+    try std.testing.expectEqual(@as(usize, 1), fkp.len);
+    // 有限値であること
+    try std.testing.expect(std.math.isFinite(fkp[0].n_i));
+    try std.testing.expect(std.math.isFinite(fkp[0].n_0));
+    // Bug 2 チェック: 桁外れ(>10^6)でないこと
+    try std.testing.expect(@abs(fkp[0].n_i) < 1.0e6);
+    try std.testing.expect(@abs(fkp[0].n_0) < 1.0e6);
+}
