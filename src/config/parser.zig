@@ -152,9 +152,9 @@ fn parseMountLine(
 ///               "host:port/mount [user:password]"
 ///
 /// 例:
-///   "rtk2go.com/nakagawa00"                      → host, port=2101, mount
-///   "rtk2go.com:2101/nakagawa00"                 → host, port=2101, mount
-///   "rtk2go.com/nakagawa00 user@example.com:pw"  → with auth
+///   "ntrip.hogehoge.com/BASE01"                      → host, port=2101, mount
+///   "ntrip.hogehoge.com:2101/BASE01"                 → host, port=2101, mount
+///   "ntrip.hogehoge.com/BASE01 user@example.com:pw"  → with auth
 fn parseFkpSource(
     allocator: std.mem.Allocator,
     value: []const u8,

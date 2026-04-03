@@ -105,12 +105,12 @@ fkp_enable true
 # 上流基準局（3局以上必須）
 # 書式: fkp_source host/mountpoint [user:password]
 # ポート変更時: fkp_source host:port/mountpoint [user:password]
-fkp_source rtk2go.com/nakagawa00 test@example.com:none
-fkp_source rtk2go.com/Asahikawa-HAMA test@example.com:none
-fkp_source rtk2go.com/UEMATSUDENKI-F9P test@example.com:none
+fkp_source ntrip.hogehoge.com/BASE01 user@example.com:pass
+fkp_source ntrip.hogehoge.com/BASE02 user@example.com:pass
+fkp_source ntrip.hogehoge.com/BASE03 user@example.com:pass
 
 # FKP 配信マウントポイント名
-fkp_mountpoint /FKP_HOKKAIDO
+fkp_mountpoint /FKP_REGION
 
 # FKP 計算間隔（秒、デフォルト: 1）
 fkp_interval 1
@@ -140,7 +140,7 @@ Source (NTRIP source device)
   └─▶ Client N
 
 FKP Engine (optional):
-  [rtk2go etc.] ──▶ [fkp/msm7.zig] ──▶ [fkp/engine.zig] ──▶ [fkp/type59.zig]
+  [NTRIP sources] ──▶ [fkp/msm7.zig] ──▶ [fkp/engine.zig] ──▶ [fkp/type59.zig]
    3+ base stations    MSM7 phase        FKP computation       RTCM Type 59
                        extraction        (Tanaka 2003)         encoding
                                               │
@@ -150,16 +150,10 @@ FKP Engine (optional):
 
 詳細: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
-## FKP Demo
+## References
 
-rtk2go.com の北海道フリー基地局3局を使った FKP 計算実証:
-
-```bash
-zig build
-./zig-out/bin/fkp-demo
-```
-
-参考文献: 田中慎治 (2003)「ネットワークRTK-GPS測位に関する研究」東京商船大学修士論文
+- 田中慎治 (2003)「ネットワークRTK-GPS測位に関する研究」東京商船大学（現 東京海洋大学）修士論文
+  - FKP 計算式: §4.3.3–4.3.4 (pp.51–57)
 
 ## Legacy C Implementation
 

@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
         &b.addRunArtifact(unit_tests).step,
     );
 
-    // ── FKP Demo (rtk2go実証クライアント) ─────────────────────────────
+    // ── FKP Demo (実証クライアント) ────────────────────────────────────
     const fkp_demo = b.addExecutable(.{
         .name = "fkp-demo",
         .root_module = b.createModule(.{

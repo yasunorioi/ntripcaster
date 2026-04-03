@@ -1,11 +1,9 @@
-//! fkp/demo.zig — FKP計算実証クライアント（北海道3局 / rtk2go）
+//! fkp/demo.zig — FKP計算実証クライアント（3局接続デモ）
 //!
 //! 使用法: zig build fkp-demo && ./zig-out/bin/fkp-demo
 //!
-//! rtk2go.com:2101 の以下の3局に同時接続してFKPを計算・配信する:
-//!   nakagawa00      (中川   44.80°N 142.06°E)
-//!   Asahikawa-HAMA  (旭川   43.80°N 142.43°E)
-//!   UEMATSUDENKI-F9P (赤平  43.58°N 142.00°E)
+//! NTRIP caster の3局に同時接続してFKPを計算・配信する。
+//! STATIONS 定数を環境に合わせて書き換えること。
 //!
 //! Phase 4 実証フロー:
 //!   1. 3局並列NTRIP接続
@@ -21,21 +19,21 @@ const engine = ntripcaster.fkp_engine;
 const type59 = ntripcaster.fkp_type59;
 const rtcm3 = ntripcaster.rtcm3;
 
-/// rtk2go北海道3局の設定
+/// デモ用3局設定（環境に合わせて書き換え）
 const STATIONS = [3]struct {
     mount: []const u8,
     host: []const u8,
     port: u16,
 }{
-    .{ .mount = "nakagawa00", .host = "rtk2go.com", .port = 2101 },
-    .{ .mount = "Asahikawa-HAMA", .host = "rtk2go.com", .port = 2101 },
-    .{ .mount = "UEMATSUDENKI-F9P", .host = "rtk2go.com", .port = 2101 },
+    .{ .mount = "BASE01", .host = "ntrip.hogehoge.com", .port = 2101 },
+    .{ .mount = "BASE02", .host = "ntrip.hogehoge.com", .port = 2101 },
+    .{ .mount = "BASE03", .host = "ntrip.hogehoge.com", .port = 2101 },
 };
 
 /// NTRIP GET リクエスト送信
 fn sendNtripGet(stream: std.net.Stream, mount: []const u8, host: []const u8, port: u16) !void {
-    // Basic認証: rtk2go は user:password 形式（任意メール:none）
-    const auth_str = "test@example.com:none";
+    // Basic認証: user:password 形式
+    const auth_str = "user@example.com:pass";
     var auth_b64: [64]u8 = undefined;
     const encoder = std.base64.standard.Encoder;
     const encoded_len = encoder.calcSize(auth_str.len);
@@ -194,7 +192,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    log("FKP Demo: 北海道3局 rtk2go 実証\n", .{});
+    log("FKP Demo: 3局接続実証\n", .{});
     log("接続先: {s}:{d}\n", .{ STATIONS[0].host, STATIONS[0].port });
 
     // 3スレッド並列接続
