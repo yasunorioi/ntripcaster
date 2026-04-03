@@ -261,3 +261,169 @@ test "parse: real ntripcaster.conf.dist" {
     const pado0 = cfg.mounts.get("/PADO0") orelse return error.MountNotFound;
     try std.testing.expect(pado0.open);
 }
+
+// ── FKP 設定 ──────────────────────────────────────────────────────────────────
+
+test "fkp: fkp_enable default false" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "port 2101\n");
+    defer cfg.deinit();
+
+    try std.testing.expect(!cfg.fkp_enable);
+}
+
+test "fkp: fkp_enable true" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_enable true\n");
+    defer cfg.deinit();
+
+    try std.testing.expect(cfg.fkp_enable);
+}
+
+test "fkp: fkp_enable false explicit" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_enable false\n");
+    defer cfg.deinit();
+
+    try std.testing.expect(!cfg.fkp_enable);
+}
+
+test "fkp: fkp_source host/mount no auth" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_source rtk2go.com/nakagawa00\n");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.fkp_sources.len);
+    const src = cfg.fkp_sources[0];
+    try std.testing.expectEqualStrings("rtk2go.com", src.host);
+    try std.testing.expectEqual(@as(u16, 2101), src.port);
+    try std.testing.expectEqualStrings("nakagawa00", src.mountpoint);
+    try std.testing.expectEqualStrings("", src.user);
+    try std.testing.expectEqualStrings("", src.password);
+}
+
+test "fkp: fkp_source host:port/mount" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_source rtk2go.com:2101/Asahikawa-HAMA\n");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.fkp_sources.len);
+    const src = cfg.fkp_sources[0];
+    try std.testing.expectEqualStrings("rtk2go.com", src.host);
+    try std.testing.expectEqual(@as(u16, 2101), src.port);
+    try std.testing.expectEqualStrings("Asahikawa-HAMA", src.mountpoint);
+}
+
+test "fkp: fkp_source with auth" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(),
+        "fkp_source rtk2go.com/UEMATSUDENKI-F9P test@example.com:none\n");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.fkp_sources.len);
+    const src = cfg.fkp_sources[0];
+    try std.testing.expectEqualStrings("rtk2go.com", src.host);
+    try std.testing.expectEqualStrings("UEMATSUDENKI-F9P", src.mountpoint);
+    try std.testing.expectEqualStrings("test@example.com", src.user);
+    try std.testing.expectEqualStrings("none", src.password);
+}
+
+test "fkp: fkp_mountpoint" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_mountpoint /FKP_HOKKAIDO\n");
+    defer cfg.deinit();
+
+    try std.testing.expectEqualStrings("/FKP_HOKKAIDO", cfg.fkp_mountpoint);
+}
+
+test "fkp: fkp_interval default 1" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), cfg.fkp_interval);
+}
+
+test "fkp: fkp_interval explicit" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_interval 5\n");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(u32, 5), cfg.fkp_interval);
+}
+
+test "fkp: fkp_source 0 sources disabled" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    var cfg = try parser.parse(arena.allocator(), "fkp_enable true\n");
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), cfg.fkp_sources.len);
+}
+
+test "fkp: fkp_source 2 sources (insufficient)" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const content =
+        \\fkp_source rtk2go.com/mount1
+        \\fkp_source rtk2go.com/mount2
+    ;
+    var cfg = try parser.parse(arena.allocator(), content);
+    defer cfg.deinit();
+
+    // パーサーは受け付ける。呼び出し元が len < 3 を判定する。
+    try std.testing.expectEqual(@as(usize, 2), cfg.fkp_sources.len);
+}
+
+test "fkp: full 3-source config with existing settings" {
+    var arena = testArena();
+    defer arena.deinit();
+
+    const content =
+        \\port 2101
+        \\server_name caster.example.com
+        \\fkp_enable true
+        \\fkp_source rtk2go.com/nakagawa00 test@example.com:none
+        \\fkp_source rtk2go.com:2101/Asahikawa-HAMA test@example.com:none
+        \\fkp_source rtk2go.com/UEMATSUDENKI-F9P test@example.com:none
+        \\fkp_mountpoint /FKP_HOKKAIDO
+        \\fkp_interval 1
+        \\/PADO0
+    ;
+    var cfg = try parser.parse(arena.allocator(), content);
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(@as(u16, 2101), cfg.port);
+    try std.testing.expectEqualStrings("caster.example.com", cfg.server_name);
+    try std.testing.expect(cfg.fkp_enable);
+    try std.testing.expectEqual(@as(usize, 3), cfg.fkp_sources.len);
+    try std.testing.expectEqualStrings("/FKP_HOKKAIDO", cfg.fkp_mountpoint);
+    try std.testing.expectEqual(@as(u32, 1), cfg.fkp_interval);
+
+    try std.testing.expectEqualStrings("nakagawa00", cfg.fkp_sources[0].mountpoint);
+    try std.testing.expectEqualStrings("Asahikawa-HAMA", cfg.fkp_sources[1].mountpoint);
+    try std.testing.expectEqualStrings("UEMATSUDENKI-F9P", cfg.fkp_sources[2].mountpoint);
+
+    // 既存マウント設定も保持
+    try std.testing.expectEqual(@as(u32, 1), cfg.mounts.count());
+}

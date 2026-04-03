@@ -29,6 +29,15 @@ pub const MountAuth = struct {
     users: []User,
 };
 
+/// FKP ソース局設定
+pub const FkpSource = struct {
+    host: []const u8,
+    port: u16 = 2101,
+    mountpoint: []const u8,
+    user: []const u8 = "",
+    password: []const u8 = "",
+};
+
 /// サーバー設定構造体
 /// 全 []const u8 フィールドは allocator から確保されたメモリを指す。
 pub const Config = struct {
@@ -56,6 +65,16 @@ pub const Config = struct {
     // ── マウント認証テーブル ──────────────────────────────────────────────
     /// キー: マウントパス（"/" で始まる）、値: MountAuth
     mounts: std.StringHashMap(MountAuth),
+
+    // ── FKP 設定 ──────────────────────────────────────────────────────────
+    /// true = FKP 機能を有効にする（fkp_enable true）
+    fkp_enable: bool = false,
+    /// FKP ソース局リスト。3局以上の場合に FKP 計算を有効化する。
+    fkp_sources: []FkpSource = &.{},
+    /// FKP 補正値を配信するマウントポイント（空文字列 = FKP 無効）
+    fkp_mountpoint: []const u8 = "",
+    /// FKP 計算間隔 [秒]
+    fkp_interval: u32 = 1,
 
     /// HashMap を解放する。文字列値の解放は呼び出し元の Arena に委ねる。
     pub fn deinit(self: *Config) void {
@@ -127,6 +146,60 @@ fn parseMountLine(
     };
 }
 
+/// fkp_source 値部分をパースして FkpSource を返す。
+///
+/// フォーマット: "host/mount [user:password]"
+///               "host:port/mount [user:password]"
+///
+/// 例:
+///   "rtk2go.com/nakagawa00"                      → host, port=2101, mount
+///   "rtk2go.com:2101/nakagawa00"                 → host, port=2101, mount
+///   "rtk2go.com/nakagawa00 user@example.com:pw"  → with auth
+fn parseFkpSource(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) ParseError!FkpSource {
+    // 最初のスペースで addr_part と opt_auth に分割
+    const sp = std.mem.indexOfAny(u8, value, " \t");
+    const addr_part = if (sp) |s| value[0..s] else value;
+    const opt_auth = if (sp) |s| std.mem.trimLeft(u8, value[s..], " \t") else "";
+
+    // addr_part を "/" で分割 → host_port / mount
+    const slash = std.mem.indexOfScalar(u8, addr_part, '/') orelse
+        return error.InvalidMountLine;
+    const host_port_str = addr_part[0..slash];
+    const mount = try allocator.dupe(u8, addr_part[slash + 1 ..]);
+
+    // host_port_str を ":" で分割 → host / port
+    var host: []const u8 = undefined;
+    var port: u16 = 2101;
+    if (std.mem.indexOfScalar(u8, host_port_str, ':')) |cp| {
+        host = try allocator.dupe(u8, host_port_str[0..cp]);
+        port = std.fmt.parseInt(u16, host_port_str[cp + 1 ..], 10) catch
+            return error.InvalidPort;
+    } else {
+        host = try allocator.dupe(u8, host_port_str);
+    }
+
+    // opt_auth が空でなければ ":" で最初の分割 → user / password
+    var user: []const u8 = "";
+    var password: []const u8 = "";
+    if (opt_auth.len > 0) {
+        const cp = std.mem.indexOfScalar(u8, opt_auth, ':') orelse
+            return error.InvalidCredential;
+        user = try allocator.dupe(u8, opt_auth[0..cp]);
+        password = try allocator.dupe(u8, opt_auth[cp + 1 ..]);
+    }
+
+    return .{
+        .host = host,
+        .port = port,
+        .mountpoint = mount,
+        .user = user,
+        .password = password,
+    };
+}
+
 // ── 公開 API ──────────────────────────────────────────────────────────────────
 
 /// ntripcaster.conf のファイル内容 `content` をパースして Config を返す。
@@ -137,6 +210,8 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
     var config = Config{
         .mounts = std.StringHashMap(MountAuth).init(allocator),
     };
+
+    var fkp_src_list = std.ArrayList(FkpSource){};
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {
@@ -180,10 +255,20 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
             config.rp_email = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "server_url")) {
             config.server_url = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "fkp_enable")) {
+            config.fkp_enable = std.mem.eql(u8, value, "true");
+        } else if (std.mem.eql(u8, key, "fkp_source")) {
+            const src = try parseFkpSource(allocator, value);
+            try fkp_src_list.append(allocator, src);
+        } else if (std.mem.eql(u8, key, "fkp_mountpoint")) {
+            config.fkp_mountpoint = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "fkp_interval")) {
+            config.fkp_interval = std.fmt.parseInt(u32, value, 10) catch return error.InvalidInteger;
         }
         // 未知のキーは無視（前方互換性）
     }
 
+    config.fkp_sources = try fkp_src_list.toOwnedSlice(allocator);
     return config;
 }
 
