@@ -154,7 +154,7 @@ pub fn extractPhase(
         var bit: u6 = 63;
         while (true) {
             if (sat_mask & (@as(u64, 1) << bit) != 0) {
-                prns[prn_count] = @as(u8, 64 - bit);
+                prns[prn_count] = 64 - @as(u8, bit);
                 prn_count += 1;
             }
             if (bit == 0) break;

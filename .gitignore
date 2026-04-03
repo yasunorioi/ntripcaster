@@ -59,3 +59,6 @@ ntripcaster0.1.5/src/Makefile
 ntripcaster0.1.5/conf/Makefile
 ntripcaster0.1.5/src/ntripcaster
 ntripcaster0.1.5/conf/ntripcaster.conf.dist
+
+# Legacy C source tree
+legacy/

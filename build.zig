@@ -60,7 +60,7 @@ pub fn build(b: *std.Build) void {
     const fkp_demo = b.addExecutable(.{
         .name = "fkp-demo",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/fkp/demo.zig"),
+            .root_source_file = b.path("tools/fkp_demo.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

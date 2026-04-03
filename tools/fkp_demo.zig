@@ -15,10 +15,11 @@
 //!      (本番では ntripcaster の仮想マウントに配信)
 
 const std = @import("std");
-const msm7 = @import("msm7.zig");
-const engine = @import("engine.zig");
-const type59 = @import("type59.zig");
-const rtcm3 = @import("../ntrip/rtcm3.zig");
+const ntripcaster = @import("ntripcaster");
+const msm7 = ntripcaster.fkp_msm7;
+const engine = ntripcaster.fkp_engine;
+const type59 = ntripcaster.fkp_type59;
+const rtcm3 = ntripcaster.rtcm3;
 
 /// rtk2go北海道3局の設定
 const STATIONS = [3]struct {
@@ -161,12 +162,7 @@ const ThreadArg = struct {
 };
 
 fn stationThread(arg: *ThreadArg) void {
-    const addr = std.net.Address.parseIp4(arg.host, arg.port) catch {
-        // ホスト名解決をシミュレート (rtk2go.com の実IP はDNS解決が必要)
-        arg.err = true;
-        return;
-    };
-    const stream = std.net.tcpConnectToAddress(addr) catch {
+    const stream = std.net.tcpConnectToHost(arg.allocator, arg.host, arg.port) catch {
         arg.err = true;
         return;
     };
@@ -187,16 +183,19 @@ fn stationThread(arg: *ThreadArg) void {
     };
 }
 
+fn log(comptime fmt: []const u8, args: anytype) void {
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    std.fs.File.stderr().writeAll(msg) catch {};
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const stderr = std.io.getStdErr().writer();
-    const stdout = std.io.getStdOut().writer();
-
-    try stderr.print("FKP Demo: 北海道3局 rtk2go 実証\n", .{});
-    try stderr.print("接続先: {s}:{d}\n", .{ STATIONS[0].host, STATIONS[0].port });
+    log("FKP Demo: 北海道3局 rtk2go 実証\n", .{});
+    log("接続先: {s}:{d}\n", .{ STATIONS[0].host, STATIONS[0].port });
 
     // 3スレッド並列接続
     var args: [3]ThreadArg = undefined;
@@ -218,18 +217,18 @@ pub fn main() !void {
 
     // 結果収集
     var station_obs_list: [3]?engine.StationObs = .{ null, null, null };
-    var all_sat_obs: [3][]engine.SatObs = undefined;
-    defer for (all_sat_obs) |s| allocator.free(s);
+    var all_sat_obs: [3]?[]engine.SatObs = .{ null, null, null };
+    defer for (all_sat_obs) |s| if (s) |sl| allocator.free(sl);
 
     var valid_count: usize = 0;
     for (0..3) |i| {
         if (args[i].err or args[i].result == null) {
-            try stderr.print("[{s}] 接続失敗\n", .{STATIONS[i].mount});
+            log("[{s}] 接続失敗\n", .{STATIONS[i].mount});
             continue;
         }
         const result = args[i].result.?;
         const coord = result.coord orelse {
-            try stderr.print("[{s}] 座標取得失敗\n", .{STATIONS[i].mount});
+            log("[{s}] 座標取得失敗\n", .{STATIONS[i].mount});
             allocator.free(result.phase_list);
             continue;
         };
@@ -239,7 +238,7 @@ pub fn main() !void {
         all_sat_obs[i] = sat_obs;
 
         station_obs_list[i] = .{ .coord = coord, .obs = sat_obs };
-        try stderr.print("[{s}] 局座標: lat={d:.4}° lon={d:.4}° 衛星数={d}\n", .{
+        log("[{s}] 局座標: lat={d:.4} lon={d:.4} 衛星数={d}\n", .{
             STATIONS[i].mount,
             coord.lat * 180.0 / std.math.pi,
             coord.lon * 180.0 / std.math.pi,
@@ -249,7 +248,7 @@ pub fn main() !void {
     }
 
     if (valid_count < 3) {
-        try stderr.print("3局揃わず({}局)。FKP計算スキップ。\n", .{valid_count});
+        log("3局揃わず({d}局)。FKP計算スキップ。\n", .{valid_count});
         return;
     }
 
@@ -261,9 +260,9 @@ pub fn main() !void {
     const fkp_params = try engine.computeFkp(allocator, &stations);
     defer allocator.free(fkp_params);
 
-    try stderr.print("FKP計算完了: {d}衛星\n", .{fkp_params.len});
+    log("FKP計算完了: {d}衛星\n", .{fkp_params.len});
     for (fkp_params) |p| {
-        try stderr.print("  PRN{d:02}: N_I={d:.4} E_I={d:.4} N_0={d:.4} E_0={d:.4}\n", .{
+        log("  PRN{d:02}: N_I={d:.4} E_I={d:.4} N_0={d:.4} E_0={d:.4}\n", .{
             p.prn, p.n_i, p.e_i, p.n_0, p.e_0,
         });
     }
@@ -273,6 +272,6 @@ pub fn main() !void {
     const frame = try type59.encodeType59(allocator, stations[0].coord.ref_station_id, tow_ms, fkp_params);
     defer allocator.free(frame);
 
-    try stdout.writeAll(frame);
-    try stderr.print("Type59 フレーム出力: {d} bytes\n", .{frame.len});
+    std.fs.File.stdout().writeAll(frame) catch {};
+    log("Type59 フレーム出力: {d} bytes\n", .{frame.len});
 }
