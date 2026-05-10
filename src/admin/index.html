@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>ntripcaster admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --dim: #8b949e;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+    --accent: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    margin-bottom: 16px;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .pills { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill {
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 12px; color: var(--dim);
+  }
+  .pill b { color: var(--fg); font-weight: 600; }
+  .pill.ok b { color: var(--ok); }
+  .pill.bad b { color: var(--bad); }
+  #conn-state { font-size: 11px; color: var(--dim); }
+  #conn-state.live { color: var(--ok); }
+  #conn-state.lost { color: var(--bad); }
+
+  section { margin-bottom: 24px; }
+  section h2 {
+    font-size: 13px; font-weight: 600; color: var(--dim);
+    margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  table {
+    width: 100%; border-collapse: collapse;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; overflow: hidden;
+  }
+  th, td {
+    text-align: left; padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.stale { opacity: 0.55; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.mono { font-family: inherit; }
+  .empty { color: var(--dim); padding: 12px; text-align: center; }
+
+  .badge {
+    display: inline-block; background: #21262d;
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 1px 6px; margin: 1px 2px 1px 0;
+    border-radius: 4px; font-size: 11px;
+  }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; vertical-align: middle; margin-right: 4px; }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: var(--warn); }
+  .dot.bad { background: var(--bad); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ntripcaster admin</h1>
+  <div class="pills">
+    <span class="pill">version <b id="m-version">—</b></span>
+    <span class="pill">listen <b id="m-listen">—</b></span>
+    <span class="pill">uptime <b id="m-uptime">—</b></span>
+    <span class="pill ok">sources <b id="m-sources">0</b></span>
+    <span class="pill ok">clients <b id="m-clients">0</b></span>
+  </div>
+  <span id="conn-state">offline</span>
+</header>
+
+<section>
+  <h2>Sources</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>mount</th>
+        <th>peer</th>
+        <th>fmt</th>
+        <th class="num">bytes_in</th>
+        <th class="num">clients</th>
+        <th>uptime</th>
+        <th>last data</th>
+        <th>msg types</th>
+      </tr>
+    </thead>
+    <tbody id="src-body">
+      <tr><td class="empty" colspan="8">—</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Clients</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>id</th>
+        <th>mount</th>
+        <th>peer</th>
+        <th class="num">bytes_out</th>
+        <th>uptime</th>
+      </tr>
+    </thead>
+    <tbody id="cli-body">
+      <tr><td class="empty" colspan="5">—</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<script>
+(function () {
+  "use strict";
+
+  const el = (id) => document.getElementById(id);
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + " MB";
+    return (n / 1024 / 1024 / 1024).toFixed(2) + " GB";
+  }
+
+  function fmtDuration(ms) {
+    if (ms < 0) ms = 0;
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return s + "s";
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + "m " + (s % 60) + "s";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + "h " + (m % 60) + "m";
+    const d = Math.floor(h / 24);
+    return d + "d " + (h % 24) + "h";
+  }
+
+  function escape(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+    }[c]));
+  }
+
+  function setText(id, v) { const e = el(id); if (e) e.textContent = v; }
+
+  function setConn(state) {
+    const e = el("conn-state");
+    e.className = state;
+    e.textContent = state === "live" ? "● live" :
+                    state === "lost" ? "● disconnected (retrying)" :
+                    "offline";
+  }
+
+  function render(snap) {
+    const status = snap.status || {};
+    setText("m-version", status.version || "?");
+    setText("m-listen", status.listen || "?");
+    setText("m-uptime", fmtDuration(status.uptime_ms || 0));
+    setText("m-sources", String(status.sources || 0));
+    setText("m-clients", String(status.clients || 0));
+
+    const now = status.now_ms || Date.now();
+
+    // Sources
+    const srcBody = el("src-body");
+    const srcs = snap.sources || [];
+    if (srcs.length === 0) {
+      srcBody.innerHTML = '<tr><td class="empty" colspan="8">no active sources</td></tr>';
+    } else {
+      srcBody.innerHTML = srcs.map((s) => {
+        const sinceData = now - (s.last_data_at_ms || 0);
+        const stale = sinceData > 10000;
+        const fmt = s.rtcm_detected ? "RTCM 3" : "—";
+        const types = (s.msg_types || []).slice().sort((a,b)=>a.type-b.type)
+          .map(mt => `<span class="badge" title="count: ${mt.count}">${mt.type}</span>`).join(" ");
+        return `<tr class="${stale ? "stale" : ""}">
+          <td class="mono">${escape(s.mount)}</td>
+          <td class="mono">${escape(s.peer)}</td>
+          <td>${fmt}</td>
+          <td class="num">${fmtBytes(s.bytes_in || 0)}</td>
+          <td class="num">${s.client_count || 0}</td>
+          <td>${fmtDuration(now - (s.started_at_ms || now))}</td>
+          <td title="${escape(new Date(s.last_data_at_ms || 0).toISOString())}">${stale ? '<span class="dot warn"></span>' : '<span class="dot ok"></span>'}${fmtDuration(sinceData)} ago</td>
+          <td>${types || '<span style="color:var(--dim)">—</span>'}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    // Clients
+    const cliBody = el("cli-body");
+    const clis = snap.clients || [];
+    if (clis.length === 0) {
+      cliBody.innerHTML = '<tr><td class="empty" colspan="5">no active clients</td></tr>';
+    } else {
+      cliBody.innerHTML = clis.map((c) => `<tr>
+        <td class="mono">${c.id}</td>
+        <td class="mono">${escape(c.mount)}</td>
+        <td class="mono">${escape(c.peer)}</td>
+        <td class="num">${fmtBytes(c.bytes_out || 0)}</td>
+        <td>${fmtDuration(now - (c.started_at_ms || now))}</td>
+      </tr>`).join("");
+    }
+  }
+
+  // ── live transport: SSE preferred, polling fallback ──────────────────────
+  let pollTimer = null;
+
+  function startPolling() {
+    if (pollTimer) return;
+    setConn("lost");
+    const tick = async () => {
+      try {
+        const [a, b, c] = await Promise.all([
+          fetch("/api/v1/status").then(r => r.json()),
+          fetch("/api/v1/sources").then(r => r.json()),
+          fetch("/api/v1/clients").then(r => r.json()),
+        ]);
+        render({ status: a, sources: b, clients: c });
+      } catch (e) {
+        // ignore — keep retrying
+      }
+    };
+    tick();
+    pollTimer = setInterval(tick, 2000);
+  }
+
+  function startSse() {
+    if (typeof EventSource === "undefined") {
+      startPolling();
+      return;
+    }
+    const es = new EventSource("/api/v1/events");
+    es.onopen = () => setConn("live");
+    es.onerror = () => {
+      setConn("lost");
+      // EventSource auto-reconnects; if it can't, fall back to polling once
+      // after several failures (use a one-shot timer).
+      if (es.readyState === EventSource.CLOSED) {
+        startPolling();
+      }
+    };
+    es.onmessage = (ev) => {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      try { render(JSON.parse(ev.data)); } catch (e) {}
+    };
+  }
+
+  startSse();
+})();
+</script>
+</body>
+</html>

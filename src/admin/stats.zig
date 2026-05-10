@@ -152,6 +152,26 @@ pub fn writeClientsJson(
     try out.append(alloc, ']');
 }
 
+/// ── /api/v1/events (SSE) のコンポジット ───────────────────────────────────
+/// 1 イベントで status / sources / clients を 1 つの JSON オブジェクトに包んで返す。
+
+pub fn writeSnapshotJson(
+    out: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    state: *server.ServerState,
+    version: []const u8,
+    server_started_at_ms: i64,
+) !void {
+    try out.append(alloc, '{');
+    try out.appendSlice(alloc, "\"status\":");
+    try writeStatusJson(out, alloc, state, version, server_started_at_ms);
+    try out.appendSlice(alloc, ",\"sources\":");
+    try writeSourcesJson(out, alloc, state);
+    try out.appendSlice(alloc, ",\"clients\":");
+    try writeClientsJson(out, alloc, state);
+    try out.append(alloc, '}');
+}
+
 // ── プリミティブ ────────────────────────────────────────────────────────────
 
 fn writeKeyInt(

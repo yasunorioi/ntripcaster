@@ -21,6 +21,8 @@ const stats = @import("stats.zig");
 
 pub const VERSION = "0.2.1";
 
+const INDEX_HTML = @embedFile("index.html");
+
 /// admin 状態。listen() に共有メモリとして渡す。
 pub const AdminState = struct {
     state: *server_mod.ServerState,
@@ -123,8 +125,7 @@ fn handleRequest(stream: std.net.Stream, admin: *AdminState) !void {
     }
 
     if (std.mem.eql(u8, req.path, "/")) {
-        try sendStatus(stream, 200, "OK", "text/plain",
-            "ntripcaster admin\nGET /api/v1/status\nGET /api/v1/sources\nGET /api/v1/clients\n");
+        try sendStatus(stream, 200, "OK", "text/html; charset=utf-8", INDEX_HTML);
         return;
     }
     if (std.mem.eql(u8, req.path, "/api/v1/status")) {
@@ -139,7 +140,43 @@ fn handleRequest(stream: std.net.Stream, admin: *AdminState) !void {
         try sendJsonBody(stream, admin, &writeClientsAdapter);
         return;
     }
+    if (std.mem.eql(u8, req.path, "/api/v1/events")) {
+        try handleSse(stream, admin);
+        return;
+    }
     try sendStatus(stream, 404, "Not Found", "text/plain", "not found\n");
+}
+
+/// SSE: 1 秒間隔で composite snapshot を data: イベントで配信。
+/// 書き込み失敗（クライアント切断）でループを抜ける。
+fn handleSse(stream: std.net.Stream, admin: *AdminState) !void {
+    const headers =
+        "HTTP/1.0 200 OK\r\n" ++
+        "Content-Type: text/event-stream\r\n" ++
+        "Cache-Control: no-store\r\n" ++
+        "Connection: close\r\n" ++
+        "X-Accel-Buffering: no\r\n\r\n";
+    stream.writeAll(headers) catch return;
+
+    // 接続直後に retry ヒントを送る
+    stream.writeAll("retry: 3000\n\n") catch return;
+
+    while (true) {
+        var arena = std.heap.ArenaAllocator.init(admin.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var body = std.ArrayList(u8){};
+        body.appendSlice(a, "data: ") catch return;
+        stats.writeSnapshotJson(&body, a, admin.state, VERSION, admin.server_started_at_ms) catch |err| {
+            admin.state.logger.warn("SSE serialize error: {}", .{err});
+            return;
+        };
+        body.appendSlice(a, "\n\n") catch return;
+
+        stream.writeAll(body.items) catch break;
+        std.Thread.sleep(1 * std.time.ns_per_s);
+    }
 }
 
 const RequestLine = struct {
