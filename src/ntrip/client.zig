@@ -22,13 +22,29 @@ pub const Client = struct {
     mount: []const u8,
     alloc: std.mem.Allocator,
 
-    pub fn create(alloc: std.mem.Allocator, id: u64, mount: []const u8) !*Client {
+    // ── Telemetry ───────────────────────────────────────────────────────
+    /// 接続元アドレス（accept() 時点）
+    peer_addr: std.net.Address,
+    /// 送信累積バイト数
+    bytes_out: std.atomic.Value(u64),
+    /// 接続確立ミリ秒タイムスタンプ
+    started_at_ms: i64,
+
+    pub fn create(
+        alloc: std.mem.Allocator,
+        id: u64,
+        mount: []const u8,
+        peer_addr: std.net.Address,
+    ) !*Client {
         const c = try alloc.create(Client);
         errdefer alloc.destroy(c);
         c.* = .{
             .id = id,
             .mount = try alloc.dupe(u8, mount),
             .alloc = alloc,
+            .peer_addr = peer_addr,
+            .bytes_out = std.atomic.Value(u64).init(0),
+            .started_at_ms = std.time.milliTimestamp(),
         };
         return c;
     }
@@ -51,6 +67,7 @@ pub fn handleClient(
     stream: std.net.Stream,
     state: *server.ServerState,
     get: protocol.ClientGet,
+    peer_addr: std.net.Address,
 ) void {
     // 1. ソース探索（アクティブなソースがなければ 404）
     const src = state.getSource(get.mount) orelse {
@@ -97,7 +114,7 @@ pub fn handleClient(
 
     // 5. Client 登録
     const id = state.nextClientId();
-    const client = Client.create(state.alloc, id, get.mount) catch |err| {
+    const client = Client.create(state.alloc, id, get.mount, peer_addr) catch |err| {
         state.logger.err("Client.create failed: {}", .{err});
         return;
     };
@@ -114,14 +131,14 @@ pub fn handleClient(
     state.logger.info("client connected: id={d} mount={s}", .{ id, get.mount });
 
     // 6. データ配信ループ
-    clientLoop(stream, src);
+    clientLoop(stream, src, client);
 
     state.logger.info("client disconnected: id={d} mount={s}", .{ id, get.mount });
 }
 
 /// リングバッファからデータを読み取ってクライアントに送信するループ。
 /// ソース切断 / バッファオーバーラン / 送信エラーで終了する。
-fn clientLoop(stream: std.net.Stream, src: *server.Source) void {
+fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client) void {
     _ = src.client_count.fetchAdd(1, .seq_cst);
     defer _ = src.client_count.fetchSub(1, .seq_cst);
 
@@ -136,6 +153,7 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source) void {
 
         if (result) |r| {
             stream.writeAll(buf[0..r.len]) catch break;
+            _ = client.bytes_out.fetchAdd(r.len, .monotonic);
             read_pos = r.next_pos;
         } else {
             // データ待ち: CPU を占有しないよう短時間スリープ

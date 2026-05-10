@@ -6,6 +6,7 @@
 const std = @import("std");
 const parser = @import("config/parser.zig");
 const server_mod = @import("server.zig");
+const admin_server = @import("admin/server.zig");
 
 const usage =
     \\Usage: ntripcaster [-c <configfile>] [-h]
@@ -78,6 +79,8 @@ pub fn main() !void {
     var state = server_mod.ServerState.init(allocator, &config, conf_dir);
     defer state.deinit();
 
+    const started_at_ms = std.time.milliTimestamp();
+
     // ── 起動バナー ──────────────────────────────────────────────────────────
     state.logger.info(
         "NtripCaster 0.2.0 (Zig) | server={s} port={d} max_clients={d} mounts={d}",
@@ -88,6 +91,28 @@ pub fn main() !void {
             config.mounts.count(),
         },
     );
+
+    // ── admin リスナー（バックグラウンドスレッド） ──────────────────────────
+    var admin = admin_server.AdminState{
+        .state = &state,
+        .bind = config.admin_bind,
+        .port = config.admin_port,
+        .user = config.admin_user,
+        .password = config.admin_password,
+        .server_started_at_ms = started_at_ms,
+        .alloc = allocator,
+    };
+    var admin_thread: ?std.Thread = null;
+    if (config.admin_enable) {
+        admin_thread = std.Thread.spawn(.{}, admin_server.listen, .{&admin}) catch |err| blk: {
+            state.logger.err("admin spawn failed: {}", .{err});
+            break :blk null;
+        };
+    }
+    defer {
+        admin.shutdown();
+        if (admin_thread) |t| t.join();
+    }
 
     // ── サーバー起動（SIGINT/SIGTERM で終了） ───────────────────────────────
     server_mod.listen(&state) catch |err| {

@@ -21,3 +21,8 @@ pub const fkp = struct {
     pub const engine = @import("fkp/engine.zig");
     pub const type59 = @import("fkp/type59.zig");
 };
+
+pub const admin = struct {
+    pub const stats = @import("admin/stats.zig");
+    pub const server = @import("admin/server.zig");
+};

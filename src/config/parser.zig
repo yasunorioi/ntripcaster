@@ -66,6 +66,18 @@ pub const Config = struct {
     /// キー: マウントパス（"/" で始まる）、値: MountAuth
     mounts: std.StringHashMap(MountAuth),
 
+    // ── 管理 (admin) HTTP ────────────────────────────────────────────────
+    /// 観測 UI / JSON API を提供する HTTP リスナーを起動するか
+    admin_enable: bool = true,
+    /// admin リスナーのバインドアドレス（既定: ループバックのみ）
+    admin_bind: []const u8 = "127.0.0.1",
+    /// admin リスナーのポート
+    admin_port: u16 = 8080,
+    /// Basic 認証ユーザー（空文字列 = 認証無効。bind を 0.0.0.0 にする場合は必ず設定する）
+    admin_user: []const u8 = "",
+    /// Basic 認証パスワード
+    admin_password: []const u8 = "",
+
     // ── FKP 設定 ──────────────────────────────────────────────────────────
     /// true = FKP 機能を有効にする（fkp_enable true）
     fkp_enable: bool = false,
@@ -255,6 +267,16 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
             config.rp_email = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "server_url")) {
             config.server_url = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "admin_enable")) {
+            config.admin_enable = std.mem.eql(u8, value, "true");
+        } else if (std.mem.eql(u8, key, "admin_bind")) {
+            config.admin_bind = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "admin_port")) {
+            config.admin_port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort;
+        } else if (std.mem.eql(u8, key, "admin_user")) {
+            config.admin_user = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "admin_password")) {
+            config.admin_password = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "fkp_enable")) {
             config.fkp_enable = std.mem.eql(u8, value, "true");
         } else if (std.mem.eql(u8, key, "fkp_source")) {

@@ -27,8 +27,23 @@ pub const Source = struct {
     /// msg_types へのアクセスを保護するロック
     msg_lock: std.Thread.Mutex,
 
-    pub fn create(alloc: std.mem.Allocator, mount: []const u8) !*Source {
+    // ── Telemetry ───────────────────────────────────────────────────────
+    /// 接続元アドレス（accept() 時点）
+    peer_addr: std.net.Address,
+    /// 受信累積バイト数
+    bytes_in: std.atomic.Value(u64),
+    /// 接続確立ミリ秒タイムスタンプ
+    started_at_ms: i64,
+    /// 最後にデータを受信したミリ秒タイムスタンプ
+    last_data_at_ms: std.atomic.Value(i64),
+
+    pub fn create(
+        alloc: std.mem.Allocator,
+        mount: []const u8,
+        peer_addr: std.net.Address,
+    ) !*Source {
         const s = try alloc.create(Source);
+        const now = std.time.milliTimestamp();
         s.* = .{
             .mount = try alloc.dupe(u8, mount),
             .ring = .{},
@@ -38,6 +53,10 @@ pub const Source = struct {
             .rtcm_detected = false,
             .msg_types = .{},
             .msg_lock = .{},
+            .peer_addr = peer_addr,
+            .bytes_in = std.atomic.Value(u64).init(0),
+            .started_at_ms = now,
+            .last_data_at_ms = std.atomic.Value(i64).init(now),
         };
         return s;
     }
@@ -63,6 +82,7 @@ pub fn handleSource(
     stream: std.net.Stream,
     state: *server.ServerState,
     login: protocol.SourceLogin,
+    peer_addr: std.net.Address,
 ) void {
     // 1. パスワード検証
     if (!auth.authenticateSource(state.config, login.password)) {
@@ -88,7 +108,7 @@ pub fn handleSource(
     }
 
     // 4. Source オブジェクト作成
-    const src = Source.create(state.alloc, login.mount) catch |err| {
+    const src = Source.create(state.alloc, login.mount, peer_addr) catch |err| {
         stream.writeAll("ERROR - Internal Error\r\n") catch {};
         state.logger.err("Source.create failed: {}", .{err});
         return;
@@ -145,6 +165,10 @@ fn sourceLoop(stream: std.net.Stream, src: *Source) void {
     while (true) {
         const n = stream.read(&buf) catch break;
         if (n == 0) break; // 接続閉鎖
+
+        // Telemetry: 受信バイト数と最終受信時刻を更新
+        _ = src.bytes_in.fetchAdd(n, .monotonic);
+        src.last_data_at_ms.store(std.time.milliTimestamp(), .monotonic);
 
         // リングバッファに透過転送（既存動作）
         src.ring.writeChunk(buf[0..n]);

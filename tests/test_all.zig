@@ -14,4 +14,5 @@ test {
     _ = @import("test_fkp.zig");
     _ = @import("test_relay.zig");
     _ = @import("test_server.zig");
+    _ = @import("test_admin.zig");
 }

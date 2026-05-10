@@ -23,8 +23,12 @@ pub const Client = client_mod.Client;
 /// 観測専用の Source スナップショット。Mutex 越しに owned コピーを返すための型。
 pub const SourceSnapshot = struct {
     mount: []const u8,
+    peer_addr: std.net.Address,
     rtcm_detected: bool,
     client_count: u32,
+    bytes_in: u64,
+    started_at_ms: i64,
+    last_data_at_ms: i64,
     /// (msg_type, count) の配列。アロケータで確保した owned slice。
     msg_types: []MsgTypeCount,
 
@@ -40,6 +44,9 @@ pub const SourceSnapshot = struct {
 pub const ClientSnapshot = struct {
     id: u64,
     mount: []const u8,
+    peer_addr: std.net.Address,
+    bytes_out: u64,
+    started_at_ms: i64,
 
     pub fn deinit(self: *ClientSnapshot, alloc: std.mem.Allocator) void {
         alloc.free(self.mount);
@@ -209,8 +216,12 @@ pub const ServerState = struct {
 
             out[i] = .{
                 .mount = try alloc.dupe(u8, src.mount),
+                .peer_addr = src.peer_addr,
                 .rtcm_detected = src.rtcm_detected,
                 .client_count = src.client_count.load(.seq_cst),
+                .bytes_in = src.bytes_in.load(.monotonic),
+                .started_at_ms = src.started_at_ms,
+                .last_data_at_ms = src.last_data_at_ms.load(.monotonic),
                 .msg_types = mt_buf,
             };
         }
@@ -232,6 +243,9 @@ pub const ServerState = struct {
             out[i] = .{
                 .id = c.id,
                 .mount = try alloc.dupe(u8, c.mount),
+                .peer_addr = c.peer_addr,
+                .bytes_out = c.bytes_out.load(.monotonic),
+                .started_at_ms = c.started_at_ms,
             };
         }
         return out;
@@ -243,6 +257,7 @@ pub const ServerState = struct {
 const ConnArgs = struct {
     stream: std.net.Stream,
     state: *ServerState,
+    peer_addr: std.net.Address,
 };
 
 fn readHeader(stream: std.net.Stream, buf: []u8) !usize {
@@ -349,8 +364,8 @@ fn handleConnection(args: ConnArgs) void {
 
     const req = protocol.parseRequest(header);
     switch (req) {
-        .source_login => |sl| source_mod.handleSource(args.stream, args.state, sl),
-        .client_get => |cg| client_mod.handleClient(args.stream, args.state, cg),
+        .source_login => |sl| source_mod.handleSource(args.stream, args.state, sl, args.peer_addr),
+        .client_get => |cg| client_mod.handleClient(args.stream, args.state, cg, args.peer_addr),
         .sourcetable_get => sendSourcetableResponse(args.stream, args.state),
         .invalid => sendBadRequest(args.stream),
     }
@@ -384,6 +399,7 @@ pub fn listen(state: *ServerState) !void {
         const args = ConnArgs{
             .stream = conn.stream,
             .state = state,
+            .peer_addr = conn.address,
         };
 
         const thread = std.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
