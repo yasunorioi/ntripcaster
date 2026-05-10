@@ -10,55 +10,50 @@ const protocol = @import("ntrip/protocol.zig");
 const relay = @import("relay/engine.zig");
 const log_mod = @import("log.zig");
 const sourcetable_mod = @import("ntrip/sourcetable.zig");
+const source_mod = @import("ntrip/source.zig");
+const client_mod = @import("ntrip/client.zig");
 
-// ── Source 構造体 ──────────────────────────────────────────────────────────────
+/// Source struct lives in `ntrip/source.zig`. Re-exported here for callers
+/// that historically referenced `server.Source`.
+pub const Source = source_mod.Source;
+pub const Client = client_mod.Client;
 
-/// マウントポイントに接続中のソース（基準局）
-pub const Source = struct {
+// ── ServerState ───────────────────────────────────────────────────────────────
+
+/// 観測専用の Source スナップショット。Mutex 越しに owned コピーを返すための型。
+pub const SourceSnapshot = struct {
     mount: []const u8,
-    ring: relay.RingBuffer,
-    /// false になるとクライアントループが終了する
-    active: std.atomic.Value(bool),
-    /// 現在接続中のクライアント数。destroy() はゼロになるまで待機する
-    client_count: std.atomic.Value(u32),
-    alloc: std.mem.Allocator,
-    /// RTCM3 ストリームを検出したら true（sourceLoop が設定）
     rtcm_detected: bool,
-    /// 観測済み RTCM3 メッセージタイプ → カウント（sourceLoop が更新）
-    msg_types: std.AutoHashMapUnmanaged(u16, u32),
-    /// msg_types へのアクセスを保護するロック
-    msg_lock: std.Thread.Mutex,
+    client_count: u32,
+    /// (msg_type, count) の配列。アロケータで確保した owned slice。
+    msg_types: []MsgTypeCount,
 
-    pub fn create(alloc: std.mem.Allocator, mount: []const u8) !*Source {
-        const s = try alloc.create(Source);
-        s.* = .{
-            .mount = try alloc.dupe(u8, mount),
-            .ring = .{},
-            .active = std.atomic.Value(bool).init(true),
-            .client_count = std.atomic.Value(u32).init(0),
-            .alloc = alloc,
-            .rtcm_detected = false,
-            .msg_types = .{},
-            .msg_lock = .{},
-        };
-        return s;
-    }
+    pub const MsgTypeCount = struct { msg_type: u16, count: u32 };
 
-    pub fn destroy(self: *Source) void {
-        self.active.store(false, .seq_cst);
-        self.msg_types.deinit(self.alloc);
-        self.alloc.free(self.mount);
-        self.alloc.destroy(self);
+    pub fn deinit(self: *SourceSnapshot, alloc: std.mem.Allocator) void {
+        alloc.free(self.mount);
+        alloc.free(self.msg_types);
     }
 };
 
-// ── ServerState ───────────────────────────────────────────────────────────────
+/// 観測専用の Client スナップショット。
+pub const ClientSnapshot = struct {
+    id: u64,
+    mount: []const u8,
+
+    pub fn deinit(self: *ClientSnapshot, alloc: std.mem.Allocator) void {
+        alloc.free(self.mount);
+    }
+};
 
 /// サーバー全体の状態。全スレッドが *ServerState を共有する。
 pub const ServerState = struct {
     config: *parser.Config,
     sources: std.StringHashMap(*Source),
     source_lock: std.Thread.Mutex,
+    clients: std.AutoHashMap(u64, *Client),
+    client_lock: std.Thread.Mutex,
+    next_client_id_atomic: std.atomic.Value(u64),
     alloc: std.mem.Allocator,
     logger: log_mod.Logger,
     /// sourcetable.dat を探すディレクトリ
@@ -81,6 +76,9 @@ pub const ServerState = struct {
             .config = config,
             .sources = std.StringHashMap(*Source).init(alloc),
             .source_lock = .{},
+            .clients = std.AutoHashMap(u64, *Client).init(alloc),
+            .client_lock = .{},
+            .next_client_id_atomic = std.atomic.Value(u64).init(1),
             .alloc = alloc,
             .logger = .{ .stderr = true },
             .conf_dir = conf_dir,
@@ -98,11 +96,21 @@ pub const ServerState = struct {
         while (self.active_handlers.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
             std.Thread.sleep(10 * std.time.ns_per_ms);
         }
-        self.source_lock.lock();
-        defer self.source_lock.unlock();
-        var it = self.sources.valueIterator();
-        while (it.next()) |src| src.*.destroy();
-        self.sources.deinit();
+        {
+            self.source_lock.lock();
+            defer self.source_lock.unlock();
+            var it = self.sources.valueIterator();
+            while (it.next()) |src| src.*.destroy();
+            self.sources.deinit();
+        }
+        {
+            self.client_lock.lock();
+            defer self.client_lock.unlock();
+            // ハンドラーが全て終了している前提だが、リーク防止に念のため。
+            var it = self.clients.valueIterator();
+            while (it.next()) |c| c.*.destroy();
+            self.clients.deinit();
+        }
     }
 
     /// TCP リスナーを閉じる。accept() ループはエラーを受け取り終了する。
@@ -118,6 +126,8 @@ pub const ServerState = struct {
             self.listener = null;
         }
     }
+
+    // ── Source レジストリ ────────────────────────────────────────────────
 
     pub fn registerSource(self: *ServerState, src: *Source) !void {
         self.source_lock.lock();
@@ -144,6 +154,87 @@ pub const ServerState = struct {
         self.source_lock.lock();
         defer self.source_lock.unlock();
         return @intCast(self.sources.count());
+    }
+
+    // ── Client レジストリ ────────────────────────────────────────────────
+
+    /// 新規クライアント ID を採番する（1 から開始の単調増加）。
+    pub fn nextClientId(self: *ServerState) u64 {
+        return self.next_client_id_atomic.fetchAdd(1, .seq_cst);
+    }
+
+    pub fn registerClient(self: *ServerState, c: *Client) !void {
+        self.client_lock.lock();
+        defer self.client_lock.unlock();
+        try self.clients.put(c.id, c);
+    }
+
+    pub fn unregisterClient(self: *ServerState, id: u64) void {
+        self.client_lock.lock();
+        defer self.client_lock.unlock();
+        _ = self.clients.remove(id);
+    }
+
+    pub fn clientCount(self: *ServerState) u32 {
+        self.client_lock.lock();
+        defer self.client_lock.unlock();
+        return @intCast(self.clients.count());
+    }
+
+    // ── Snapshot API（admin / 観測用） ──────────────────────────────────
+
+    /// 全ソースの owned スナップショットを返す。caller は要素ごとに deinit() を呼ぶ。
+    pub fn snapshotSources(self: *ServerState, alloc: std.mem.Allocator) ![]SourceSnapshot {
+        self.source_lock.lock();
+        defer self.source_lock.unlock();
+
+        var out = try alloc.alloc(SourceSnapshot, self.sources.count());
+        errdefer alloc.free(out);
+
+        var i: usize = 0;
+        var it = self.sources.valueIterator();
+        while (it.next()) |src_pp| : (i += 1) {
+            const src = src_pp.*;
+
+            // msg_types を mutex 越しに owned slice 化
+            src.msg_lock.lock();
+            const mt_count = src.msg_types.count();
+            const mt_buf = try alloc.alloc(SourceSnapshot.MsgTypeCount, mt_count);
+            var j: usize = 0;
+            var mt_it = src.msg_types.iterator();
+            while (mt_it.next()) |kv| : (j += 1) {
+                mt_buf[j] = .{ .msg_type = kv.key_ptr.*, .count = kv.value_ptr.* };
+            }
+            src.msg_lock.unlock();
+
+            out[i] = .{
+                .mount = try alloc.dupe(u8, src.mount),
+                .rtcm_detected = src.rtcm_detected,
+                .client_count = src.client_count.load(.seq_cst),
+                .msg_types = mt_buf,
+            };
+        }
+        return out;
+    }
+
+    /// 全クライアントの owned スナップショットを返す。caller は要素ごとに deinit() を呼ぶ。
+    pub fn snapshotClients(self: *ServerState, alloc: std.mem.Allocator) ![]ClientSnapshot {
+        self.client_lock.lock();
+        defer self.client_lock.unlock();
+
+        var out = try alloc.alloc(ClientSnapshot, self.clients.count());
+        errdefer alloc.free(out);
+
+        var i: usize = 0;
+        var it = self.clients.valueIterator();
+        while (it.next()) |c_pp| : (i += 1) {
+            const c = c_pp.*;
+            out[i] = .{
+                .id = c.id,
+                .mount = try alloc.dupe(u8, c.mount),
+            };
+        }
+        return out;
     }
 };
 
@@ -248,9 +339,6 @@ fn handleConnection(args: ConnArgs) void {
         args.state.logger.warn("connection rejected: max_clients ({d}) exceeded", .{args.state.config.max_clients});
         return;
     }
-
-    const source_mod = @import("ntrip/source.zig");
-    const client_mod = @import("ntrip/client.zig");
 
     var header_buf: [4096]u8 = undefined;
     const header_len = readHeader(args.stream, &header_buf) catch {

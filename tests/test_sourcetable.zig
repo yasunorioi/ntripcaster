@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const ntripcaster = @import("ntripcaster");
-const sourcetable = ntripcaster.sourcetable;
+const sourcetable = ntripcaster.ntrip.sourcetable;
 
 // ── buildResponse ─────────────────────────────────────────────────────────────
 

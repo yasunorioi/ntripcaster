@@ -13,7 +13,7 @@
 const std = @import("std");
 const ntripcaster = @import("ntripcaster");
 const parser = ntripcaster.config;
-const server_mod = ntripcaster.server_mod;
+const server_mod = ntripcaster.server;
 
 // ── テストヘルパー ────────────────────────────────────────────────────────────
 

@@ -14,10 +14,10 @@
 
 const std = @import("std");
 const ntripcaster = @import("ntripcaster");
-const msm7 = ntripcaster.fkp_msm7;
-const engine = ntripcaster.fkp_engine;
-const type59 = ntripcaster.fkp_type59;
-const rtcm3 = ntripcaster.rtcm3;
+const msm7 = ntripcaster.fkp.msm7;
+const engine = ntripcaster.fkp.engine;
+const type59 = ntripcaster.fkp.type59;
+const rtcm3 = ntripcaster.ntrip.rtcm3;
 
 /// デモ用3局設定（環境に合わせて書き換え）
 const STATIONS = [3]struct {

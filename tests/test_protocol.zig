@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const ntripcaster = @import("ntripcaster");
-const protocol = ntripcaster.ntrip_protocol;
+const protocol = ntripcaster.ntrip.protocol;
 
 // ── SOURCE ────────────────────────────────────────────────────────────────────
 

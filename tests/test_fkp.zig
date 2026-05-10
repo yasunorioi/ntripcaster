@@ -2,10 +2,10 @@
 
 const std = @import("std");
 const ntripcaster = @import("ntripcaster");
-const fkp_bits = ntripcaster.fkp_bits;
-const fkp_msm7 = ntripcaster.fkp_msm7;
-const fkp_engine = ntripcaster.fkp_engine;
-const fkp_type59 = ntripcaster.fkp_type59;
+const fkp_bits = ntripcaster.fkp.bits;
+const fkp_msm7 = ntripcaster.fkp.msm7;
+const fkp_engine = ntripcaster.fkp.engine;
+const fkp_type59 = ntripcaster.fkp.type59;
 
 // ── BitReader / BitWriter ─────────────────────────────────────────────────────
 
@@ -179,7 +179,7 @@ test "fkp: encodeType59 produces valid RTCM3 frame" {
     try std.testing.expectEqual(@as(u8, 0xD3), frame[0]);
 
     // CRC 検証（rtcm3.parseFrame 経由）
-    const parse_result = ntripcaster.rtcm3.parseFrame(frame);
+    const parse_result = ntripcaster.ntrip.rtcm3.parseFrame(frame);
     try std.testing.expect(parse_result != null);
     try std.testing.expectEqual(@as(u16, 59), parse_result.?.msg_type);
 }

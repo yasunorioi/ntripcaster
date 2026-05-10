@@ -11,6 +11,45 @@ const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
 const rtcm3 = @import("rtcm3.zig");
 
+/// マウントポイントに接続中のソース（基準局）。
+pub const Source = struct {
+    mount: []const u8,
+    ring: relay.RingBuffer,
+    /// false になるとクライアントループが終了する
+    active: std.atomic.Value(bool),
+    /// 現在接続中のクライアント数。destroy() はゼロになるまで待機する
+    client_count: std.atomic.Value(u32),
+    alloc: std.mem.Allocator,
+    /// RTCM3 ストリームを検出したら true（sourceLoop が設定）
+    rtcm_detected: bool,
+    /// 観測済み RTCM3 メッセージタイプ → カウント（sourceLoop が更新）
+    msg_types: std.AutoHashMapUnmanaged(u16, u32),
+    /// msg_types へのアクセスを保護するロック
+    msg_lock: std.Thread.Mutex,
+
+    pub fn create(alloc: std.mem.Allocator, mount: []const u8) !*Source {
+        const s = try alloc.create(Source);
+        s.* = .{
+            .mount = try alloc.dupe(u8, mount),
+            .ring = .{},
+            .active = std.atomic.Value(bool).init(true),
+            .client_count = std.atomic.Value(u32).init(0),
+            .alloc = alloc,
+            .rtcm_detected = false,
+            .msg_types = .{},
+            .msg_lock = .{},
+        };
+        return s;
+    }
+
+    pub fn destroy(self: *Source) void {
+        self.active.store(false, .seq_cst);
+        self.msg_types.deinit(self.alloc);
+        self.alloc.free(self.mount);
+        self.alloc.destroy(self);
+    }
+};
+
 /// ソース接続のエントリポイント。
 ///
 /// 処理フロー:
@@ -49,7 +88,7 @@ pub fn handleSource(
     }
 
     // 4. Source オブジェクト作成
-    const src = server.Source.create(state.alloc, login.mount) catch |err| {
+    const src = Source.create(state.alloc, login.mount) catch |err| {
         stream.writeAll("ERROR - Internal Error\r\n") catch {};
         state.logger.err("Source.create failed: {}", .{err});
         return;
@@ -84,7 +123,7 @@ pub fn handleSource(
 }
 
 /// メッセージタイプを Source に記録する（スレッドセーフ）。
-fn recordMsgType(src: *server.Source, msg_type: u16) void {
+fn recordMsgType(src: *Source, msg_type: u16) void {
     src.msg_lock.lock();
     defer src.msg_lock.unlock();
     const gop = src.msg_types.getOrPut(src.alloc, msg_type) catch return;
@@ -97,7 +136,7 @@ fn recordMsgType(src: *server.Source, msg_type: u16) void {
 
 /// RTCMデータを受信してリングバッファに書き込むループ。
 /// 並行して RTCM3 フレーム解析を行い、メッセージタイプ統計を蓄積する。
-fn sourceLoop(stream: std.net.Stream, src: *server.Source) void {
+fn sourceLoop(stream: std.net.Stream, src: *Source) void {
     var buf: [relay.RingBuffer.CHUNK_SIZE]u8 = undefined;
     // RTCM3 フレーム解析用バッファ（チャンク跨ぎ対応：最大 2 チャンク分）
     var parse_buf: [relay.RingBuffer.CHUNK_SIZE * 2]u8 = undefined;

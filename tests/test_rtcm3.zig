@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const ntripcaster = @import("ntripcaster");
-const rtcm3 = ntripcaster.rtcm3;
+const rtcm3 = ntripcaster.ntrip.rtcm3;
 
 // ── テストヘルパー ────────────────────────────────────────────────────────────
 

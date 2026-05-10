@@ -1,10 +1,13 @@
-//! ntrip/client.zig — NTRIPクライアント接続ハンドラ
+//! ntrip/client.zig — NTRIPクライアント接続ハンドラ + Client 構造体
 //!
 //! 原典 client.c の client_login() / greet_client() / source_write_to_client() を
 //! Zig で再実装。
 //!
 //! クライアントは "ICY 200 OK" の後、ソースのリングバッファからRTCMデータを受信する。
 //! ソース切断またはバッファオーバーランで接続を切断する。
+//!
+//! Client 構造体は接続中クライアントを ServerState から追跡するためのレコード。
+//! Phase C 時点では id と mount のみ。Phase A で telemetry (peer / bytes / 時刻) を追加。
 
 const std = @import("std");
 const server = @import("../server.zig");
@@ -12,13 +15,37 @@ const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
 
+/// 接続中の NTRIP クライアント (rover) を表す。
+pub const Client = struct {
+    id: u64,
+    /// 購読中のマウント名（heap 上、Client が所有）
+    mount: []const u8,
+    alloc: std.mem.Allocator,
+
+    pub fn create(alloc: std.mem.Allocator, id: u64, mount: []const u8) !*Client {
+        const c = try alloc.create(Client);
+        errdefer alloc.destroy(c);
+        c.* = .{
+            .id = id,
+            .mount = try alloc.dupe(u8, mount),
+            .alloc = alloc,
+        };
+        return c;
+    }
+
+    pub fn destroy(self: *Client) void {
+        self.alloc.free(self.mount);
+        self.alloc.destroy(self);
+    }
+};
+
 /// クライアント接続のエントリポイント。
 ///
 /// 処理フロー:
 ///   1. Basic認証 or オープンマウント判定
 ///   2. マウント探索（ソースが存在しない場合は 404）
 ///   3. "ICY 200 OK\r\n\r\n" 送信
-///   4. RingBuffer からデータを読み取り → クライアントに送信
+///   4. Client 登録 → RingBuffer からデータを読み取り → クライアントに送信
 ///   5. ソース切断 / バッファオーバーラン / 送信エラーで接続終了
 pub fn handleClient(
     stream: std.net.Stream,
@@ -67,12 +94,29 @@ pub fn handleClient(
 
     // 4. ICY 200 OK 応答
     stream.writeAll("ICY 200 OK\r\n\r\n") catch return;
-    state.logger.info("client connected: mount={s}", .{get.mount});
 
-    // 4. データ配信ループ
+    // 5. Client 登録
+    const id = state.nextClientId();
+    const client = Client.create(state.alloc, id, get.mount) catch |err| {
+        state.logger.err("Client.create failed: {}", .{err});
+        return;
+    };
+    state.registerClient(client) catch |err| {
+        state.logger.err("registerClient failed: {}", .{err});
+        client.destroy();
+        return;
+    };
+    defer {
+        state.unregisterClient(id);
+        client.destroy();
+    }
+
+    state.logger.info("client connected: id={d} mount={s}", .{ id, get.mount });
+
+    // 6. データ配信ループ
     clientLoop(stream, src);
 
-    state.logger.info("client disconnected: mount={s}", .{get.mount});
+    state.logger.info("client disconnected: id={d} mount={s}", .{ id, get.mount });
 }
 
 /// リングバッファからデータを読み取ってクライアントに送信するループ。
