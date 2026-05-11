@@ -30,6 +30,12 @@ subgraph group_runtime["Zig runtime"]
   node_fkp_bits["Bits<br/>bit helpers<br/>[bits.zig]"]
 end
 
+subgraph group_admin["Admin HTTP / UI"]
+  node_admin_server["Admin server<br/>HTTP + SSE<br/>[admin/server.zig]"]
+  node_admin_stats["Stats<br/>JSON serializer<br/>[admin/stats.zig]"]
+  node_admin_ui(("Dashboard<br/>embedded HTML/JS<br/>[admin/index.html]"))
+end
+
 subgraph group_ops["Config & deployment"]
   node_build["Build<br/>[build.zig]"]
   node_config["Config parser<br/>control plane<br/>[parser.zig]"]
@@ -67,6 +73,10 @@ node_fkp_engine -->|"encodes"| node_fkp_type59
 node_fkp_type59 -->|"uses"| node_fkp_bits
 node_fkp_engine -.->|"aggregates"| node_source
 node_fkp_engine -.->|"exposes"| node_client
+node_main -->|"spawns"| node_admin_server
+node_admin_server -->|"snapshots"| node_server
+node_admin_server -->|"serializes via"| node_admin_stats
+node_admin_server -->|"serves"| node_admin_ui
 node_legacy_main -->|"drives"| node_legacy_source
 node_legacy_main -->|"drives"| node_legacy_client
 node_legacy_main -->|"uses"| node_legacy_log
@@ -105,6 +115,9 @@ click node_legacy_log "https://github.com/yasunorioi/ntripcaster/blob/master/leg
 click node_tests "https://github.com/yasunorioi/ntripcaster/blob/master/tests/test_all.zig"
 click node_interop "https://github.com/yasunorioi/ntripcaster/blob/master/tests/test_interop.sh"
 click node_demo "https://github.com/yasunorioi/ntripcaster/blob/master/tools/fkp_demo.zig"
+click node_admin_server "https://github.com/yasunorioi/ntripcaster/blob/master/src/admin/server.zig"
+click node_admin_stats "https://github.com/yasunorioi/ntripcaster/blob/master/src/admin/stats.zig"
+click node_admin_ui "https://github.com/yasunorioi/ntripcaster/blob/master/src/admin/index.html"
 
 classDef toneNeutral fill:#f8fafc,stroke:#334155,stroke-width:1.5px,color:#0f172a
 classDef toneBlue fill:#dbeafe,stroke:#2563eb,stroke-width:1.5px,color:#172554
@@ -114,6 +127,7 @@ classDef toneRose fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337
 classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
 class node_main,node_lib,node_server,node_auth,node_source,node_rtcm3,node_relay,node_client,node_protocol,node_sourcetable,node_fkp_engine,node_fkp_msm7,node_fkp_type59,node_fkp_bits toneBlue
+class node_admin_server,node_admin_stats,node_admin_ui toneIndigo
 class node_build,node_config,node_log toneAmber
 class node_legacy_main,node_legacy_source,node_legacy_client,node_legacy_log toneMint
 class node_tests,node_interop,node_demo toneRose
@@ -128,6 +142,8 @@ class node_tests,node_interop,node_demo toneRose
 - Dynamic sourcetable generation from active sources
 - RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection)
 - FKP (Flächenkorrekturparameter) computation engine for Network RTK
+- **Admin UI + JSON API** (`/api/v1/{status,sources,clients,events}`) with SSE live updates and embedded vanilla-JS dashboard
+- Per-connection telemetry: peer address, bytes_in/out, started_at, last_data_at, per-source RTCM3 message-type counts
 - Cross-compile ready: `x86_64-linux-musl`, `aarch64-linux-musl`, `arm-linux-musleabihf`, `mipsel-linux-musl`
 - systemd service unit with hardening options
 - Single static binary — no runtime dependencies
@@ -203,6 +219,11 @@ sudo journalctl -u ntripcaster -f
 | `max_sources` | `40` | 最大ソース接続数 |
 | `logdir` | `logs` | ログ出力ディレクトリ |
 | `logfile` | `ntripcaster.log` | ログファイル名 |
+| `admin_enable` | `true` | 管理 UI / API リスナーを起動 |
+| `admin_bind` | `127.0.0.1` | 管理リスナーのバインドアドレス |
+| `admin_port` | `8080` | 管理リスナーのポート |
+| `admin_user` | *(空)* | Basic 認証ユーザー（空なら認証無効） |
+| `admin_password` | *(空)* | Basic 認証パスワード |
 
 ### FKP 設定
 
@@ -228,6 +249,77 @@ fkp_interval 1
 ```
 
 詳細は [`conf/ntripcaster.conf`](conf/ntripcaster.conf) を参照。
+
+## 管理 UI / API
+
+NTRIP リスナーとは別ポートで観測用 HTTP サーバーが起動する（既定: `127.0.0.1:8080`）。
+ブラウザで `http://127.0.0.1:8080/` を開くと、SSE で 1 秒ごとに自動更新されるダッシュボードが表示される。
+
+### エンドポイント
+
+| メソッド | パス | 用途 |
+|---------|------|------|
+| `GET` | `/` | 管理 UI（HTML、バイナリに `@embedFile` 同梱） |
+| `GET` | `/api/v1/status` | バージョン / uptime / listen / sources / clients |
+| `GET` | `/api/v1/sources` | 接続中ソース一覧（peer / bytes_in / msg_types / 時刻） |
+| `GET` | `/api/v1/clients` | 接続中クライアント一覧（id / peer / mount / bytes_out / 時刻） |
+| `GET` | `/api/v1/events` | SSE。`text/event-stream` で 1 秒ごとに composite snapshot を配信 |
+
+### 認証
+
+`admin_user` を設定すると HTTP Basic 認証が有効になる。空のままなら認証無効。
+
+```conf
+admin_bind 127.0.0.1
+admin_port 8080
+admin_user admin
+admin_password s3cret
+```
+
+> `admin_bind` を `0.0.0.0` にする場合は **必ず** `admin_user` / `admin_password` を設定すること。
+> 既定のループバック限定 (`127.0.0.1`) 運用なら認証なしでも安全。
+
+### サンプル
+
+```bash
+# 概要
+curl -s http://127.0.0.1:8080/api/v1/status | jq
+
+# 接続中ソース
+curl -s http://127.0.0.1:8080/api/v1/sources | jq
+
+# ライブ配信（Ctrl-C で抜ける）
+curl -N http://127.0.0.1:8080/api/v1/events
+```
+
+`status` レスポンス例:
+
+```json
+{
+  "version": "0.2.1",
+  "started_at_ms": 1778435211631,
+  "now_ms": 1778435214637,
+  "uptime_ms": 3006,
+  "sources": 0,
+  "clients": 0,
+  "listen": "0.0.0.0:2101"
+}
+```
+
+`sources` レスポンス例:
+
+```json
+[{
+  "mount": "/BASE01",
+  "peer": "127.0.0.1:56540",
+  "rtcm_detected": true,
+  "client_count": 1,
+  "bytes_in": 12345,
+  "started_at_ms": 1778435019192,
+  "last_data_at_ms": 1778435021013,
+  "msg_types": [{"type": 1005, "count": 10}, {"type": 1077, "count": 25}]
+}]
+```
 
 ## Architecture
 
@@ -257,6 +349,11 @@ FKP Engine (optional):
                                               │
                                               ▼
                                      Virtual mountpoint (/FKP_*)
+
+Admin HTTP (default 127.0.0.1:8080, separate listener thread):
+  Browser ──▶ GET /                 ──▶ [admin/server.zig] ──▶ embedded index.html
+          ──▶ GET /api/v1/{...}     ──▶ snapshotSources/Clients ──▶ [admin/stats.zig] JSON
+          ──▶ GET /api/v1/events    ──▶ SSE loop (1s tick, composite snapshot)
 ```
 
 詳細: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
