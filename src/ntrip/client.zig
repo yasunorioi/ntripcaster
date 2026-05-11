@@ -25,8 +25,10 @@ pub const Client = struct {
     // ── Telemetry ───────────────────────────────────────────────────────
     /// 接続元アドレス（accept() 時点）
     peer_addr: std.net.Address,
-    /// 送信累積バイト数
-    bytes_out: std.atomic.Value(u64),
+    /// 送信累積バイト数（stat_lock で保護。32-bit 環境で 64-bit atomic が無いため Mutex 使用）
+    bytes_out: u64,
+    /// stat_lock: bytes_out を保護する
+    stat_lock: std.Thread.Mutex,
     /// 接続確立ミリ秒タイムスタンプ
     started_at_ms: i64,
 
@@ -43,7 +45,8 @@ pub const Client = struct {
             .mount = try alloc.dupe(u8, mount),
             .alloc = alloc,
             .peer_addr = peer_addr,
-            .bytes_out = std.atomic.Value(u64).init(0),
+            .bytes_out = 0,
+            .stat_lock = .{},
             .started_at_ms = std.time.milliTimestamp(),
         };
         return c;
@@ -153,7 +156,9 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client) void
 
         if (result) |r| {
             stream.writeAll(buf[0..r.len]) catch break;
-            _ = client.bytes_out.fetchAdd(r.len, .monotonic);
+            client.stat_lock.lock();
+            client.bytes_out += r.len;
+            client.stat_lock.unlock();
             read_pos = r.next_pos;
         } else {
             // データ待ち: CPU を占有しないよう短時間スリープ

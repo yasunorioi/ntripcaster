@@ -24,18 +24,19 @@ pub const Source = struct {
     rtcm_detected: bool,
     /// 観測済み RTCM3 メッセージタイプ → カウント（sourceLoop が更新）
     msg_types: std.AutoHashMapUnmanaged(u16, u32),
-    /// msg_types へのアクセスを保護するロック
+    /// msg_types / bytes_in / last_data_at_ms をまとめて保護する Mutex。
+    /// 32-bit ARM/MIPSEL で 64-bit atomic が無いため、Mutex で u64/i64 を直接保護する。
     msg_lock: std.Thread.Mutex,
 
     // ── Telemetry ───────────────────────────────────────────────────────
     /// 接続元アドレス（accept() 時点）
     peer_addr: std.net.Address,
-    /// 受信累積バイト数
-    bytes_in: std.atomic.Value(u64),
+    /// 受信累積バイト数（msg_lock で保護）
+    bytes_in: u64,
     /// 接続確立ミリ秒タイムスタンプ
     started_at_ms: i64,
-    /// 最後にデータを受信したミリ秒タイムスタンプ
-    last_data_at_ms: std.atomic.Value(i64),
+    /// 最後にデータを受信したミリ秒タイムスタンプ（msg_lock で保護）
+    last_data_at_ms: i64,
 
     pub fn create(
         alloc: std.mem.Allocator,
@@ -54,9 +55,9 @@ pub const Source = struct {
             .msg_types = .{},
             .msg_lock = .{},
             .peer_addr = peer_addr,
-            .bytes_in = std.atomic.Value(u64).init(0),
+            .bytes_in = 0,
             .started_at_ms = now,
-            .last_data_at_ms = std.atomic.Value(i64).init(now),
+            .last_data_at_ms = now,
         };
         return s;
     }
@@ -166,9 +167,12 @@ fn sourceLoop(stream: std.net.Stream, src: *Source) void {
         const n = stream.read(&buf) catch break;
         if (n == 0) break; // 接続閉鎖
 
-        // Telemetry: 受信バイト数と最終受信時刻を更新
-        _ = src.bytes_in.fetchAdd(n, .monotonic);
-        src.last_data_at_ms.store(std.time.milliTimestamp(), .monotonic);
+        // Telemetry: 受信バイト数と最終受信時刻を更新（msg_lock 保護下で u64 を書き換え）
+        const now_ms = std.time.milliTimestamp();
+        src.msg_lock.lock();
+        src.bytes_in += n;
+        src.last_data_at_ms = now_ms;
+        src.msg_lock.unlock();
 
         // リングバッファに透過転送（既存動作）
         src.ring.writeChunk(buf[0..n]);

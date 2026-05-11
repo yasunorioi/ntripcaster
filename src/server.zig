@@ -59,8 +59,10 @@ pub const ServerState = struct {
     sources: std.StringHashMap(*Source),
     source_lock: std.Thread.Mutex,
     clients: std.AutoHashMap(u64, *Client),
+    /// clients マップと next_client_id_value を保護する Mutex
     client_lock: std.Thread.Mutex,
-    next_client_id_atomic: std.atomic.Value(u64),
+    /// 採番済みクライアント ID（client_lock で保護）
+    next_client_id_value: u64,
     alloc: std.mem.Allocator,
     logger: log_mod.Logger,
     /// sourcetable.dat を探すディレクトリ
@@ -85,7 +87,7 @@ pub const ServerState = struct {
             .source_lock = .{},
             .clients = std.AutoHashMap(u64, *Client).init(alloc),
             .client_lock = .{},
-            .next_client_id_atomic = std.atomic.Value(u64).init(1),
+            .next_client_id_value = 1,
             .alloc = alloc,
             .logger = .{ .stderr = true },
             .conf_dir = conf_dir,
@@ -167,7 +169,11 @@ pub const ServerState = struct {
 
     /// 新規クライアント ID を採番する（1 から開始の単調増加）。
     pub fn nextClientId(self: *ServerState) u64 {
-        return self.next_client_id_atomic.fetchAdd(1, .seq_cst);
+        self.client_lock.lock();
+        defer self.client_lock.unlock();
+        const id = self.next_client_id_value;
+        self.next_client_id_value +%= 1;
+        return id;
     }
 
     pub fn registerClient(self: *ServerState, c: *Client) !void {
@@ -203,7 +209,7 @@ pub const ServerState = struct {
         while (it.next()) |src_pp| : (i += 1) {
             const src = src_pp.*;
 
-            // msg_types を mutex 越しに owned slice 化
+            // msg_types / bytes_in / last_data_at_ms を msg_lock 越しに owned コピー
             src.msg_lock.lock();
             const mt_count = src.msg_types.count();
             const mt_buf = try alloc.alloc(SourceSnapshot.MsgTypeCount, mt_count);
@@ -212,6 +218,8 @@ pub const ServerState = struct {
             while (mt_it.next()) |kv| : (j += 1) {
                 mt_buf[j] = .{ .msg_type = kv.key_ptr.*, .count = kv.value_ptr.* };
             }
+            const bytes_in_snap = src.bytes_in;
+            const last_data_at_snap = src.last_data_at_ms;
             src.msg_lock.unlock();
 
             out[i] = .{
@@ -219,9 +227,9 @@ pub const ServerState = struct {
                 .peer_addr = src.peer_addr,
                 .rtcm_detected = src.rtcm_detected,
                 .client_count = src.client_count.load(.seq_cst),
-                .bytes_in = src.bytes_in.load(.monotonic),
+                .bytes_in = bytes_in_snap,
                 .started_at_ms = src.started_at_ms,
-                .last_data_at_ms = src.last_data_at_ms.load(.monotonic),
+                .last_data_at_ms = last_data_at_snap,
                 .msg_types = mt_buf,
             };
         }
@@ -240,11 +248,16 @@ pub const ServerState = struct {
         var it = self.clients.valueIterator();
         while (it.next()) |c_pp| : (i += 1) {
             const c = c_pp.*;
+
+            c.stat_lock.lock();
+            const bytes_out_snap = c.bytes_out;
+            c.stat_lock.unlock();
+
             out[i] = .{
                 .id = c.id,
                 .mount = try alloc.dupe(u8, c.mount),
                 .peer_addr = c.peer_addr,
-                .bytes_out = c.bytes_out.load(.monotonic),
+                .bytes_out = bytes_out_snap,
                 .started_at_ms = c.started_at_ms,
             };
         }
