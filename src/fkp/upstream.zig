@@ -34,13 +34,24 @@ pub const Config = struct {
     gga_lon_deg: f64 = 0.0,
 };
 
-/// 上流から渡されたスナップショット。`takeSnapshotAndReset()` で取り出す。
+/// 上流から渡されたスナップショット。`takeSnapshot()` で取り出す。
 /// `phase_list` は caller-allocated。read 後に caller が free する。
 pub const Snapshot = struct {
     coord: ?msm7.StationCoord,
-    /// 累積された PhaseObs。allocator で割り当て済み。
+    /// 「フレッシュな」観測値リスト ((prn,band) ごとに最新、age 上限内)。
     phase_list: []msm7.PhaseObs,
 };
+
+/// 観測値エントリ。タイムスタンプ付きで保管し、古くなったら snapshot から除外する。
+const ObsEntry = struct {
+    obs: msm7.PhaseObs,
+    ts_ms: i64,
+};
+
+/// (prn, band) を 1 つの u16 キーにエンコードする。
+fn obsKey(prn: u8, band: msm7.Band) u16 {
+    return (@as(u16, prn) << 8) | @intFromEnum(band);
+}
 
 /// パススルー callback: raw RTCM3 バイトをそのまま転送する。
 /// 主上流のみで使う (仮想 mountpoint への注入)。
@@ -54,7 +65,13 @@ pub const Upstream = struct {
     /// 蓄積バッファ (lock で保護)
     lock: std.Thread.Mutex,
     coord: ?msm7.StationCoord,
-    phase_list: std.ArrayList(msm7.PhaseObs),
+    /// (prn, band) → 最新観測。新着で上書き、古いエントリは snapshot 時に除外。
+    /// ArrayList ではなく Map にすることで「station A のみ更新が遅い」レースを回避。
+    phase_map: std.AutoHashMapUnmanaged(u16, ObsEntry),
+
+    /// snapshot に含める観測値の age 上限 [ms]。これより古いエントリは「死んでる」扱い。
+    /// 通常 MSM7 は 1 秒間隔で来るので、10 秒もあれば過剰に余裕。
+    max_obs_age_ms: i64 = 10 * std.time.ms_per_s,
 
     /// 受信ライフサイクル
     active: std.atomic.Value(bool),
@@ -86,7 +103,8 @@ pub const Upstream = struct {
             .logger = logger,
             .lock = .{},
             .coord = null,
-            .phase_list = .{},
+            .phase_map = .{},
+            .max_obs_age_ms = 10 * std.time.ms_per_s,
             .active = std.atomic.Value(bool).init(true),
             .last_data_at_ms = std.time.milliTimestamp(),
             .passthrough_ctx = null,
@@ -98,7 +116,7 @@ pub const Upstream = struct {
 
     pub fn destroy(self: *Upstream) void {
         self.lock.lock();
-        self.phase_list.deinit(self.alloc);
+        self.phase_map.deinit(self.alloc);
         self.lock.unlock();
         self.alloc.free(self.cfg.host);
         self.alloc.free(self.cfg.mount);
@@ -126,14 +144,32 @@ pub const Upstream = struct {
         }
     }
 
-    /// 現在の蓄積を取り出して内部をクリアする。caller が phase_list を free。
-    pub fn takeSnapshotAndReset(self: *Upstream, alloc: std.mem.Allocator) !Snapshot {
+    /// 「フレッシュな」観測値の owned コピーを返す。内部はクリアせず、新着で
+    /// 自動的に上書きされる。age 上限を超えたエントリは結果に含めない (が、map
+    /// からの GC は次の挿入時に任せる)。caller が phase_list を free する。
+    pub fn takeSnapshot(self: *Upstream, alloc: std.mem.Allocator) !Snapshot {
         self.lock.lock();
         defer self.lock.unlock();
 
-        const out_list = try alloc.alloc(msm7.PhaseObs, self.phase_list.items.len);
-        @memcpy(out_list, self.phase_list.items);
-        self.phase_list.clearRetainingCapacity();
+        const now = std.time.milliTimestamp();
+        const cutoff = now - self.max_obs_age_ms;
+
+        // フレッシュなエントリを数える
+        var fresh: usize = 0;
+        var it = self.phase_map.valueIterator();
+        while (it.next()) |v| {
+            if (v.ts_ms >= cutoff) fresh += 1;
+        }
+
+        const out_list = try alloc.alloc(msm7.PhaseObs, fresh);
+        var i: usize = 0;
+        var it2 = self.phase_map.valueIterator();
+        while (it2.next()) |v| {
+            if (v.ts_ms >= cutoff) {
+                out_list[i] = v.obs;
+                i += 1;
+            }
+        }
 
         return .{
             .coord = self.coord,
@@ -426,14 +462,18 @@ fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
             }
         },
         1077, 1087, 1097 => {
-            // MSM7 の搬送波位相を抽出して蓄積
+            // MSM7 の搬送波位相を抽出して最新観測 map に上書き
             const obs = msm7.extractPhase(self.alloc, payload) catch return;
             defer self.alloc.free(obs);
 
+            const now = std.time.milliTimestamp();
             self.lock.lock();
             defer self.lock.unlock();
             for (obs) |o| {
-                self.phase_list.append(self.alloc, o) catch return;
+                self.phase_map.put(self.alloc, obsKey(o.prn, o.band), .{
+                    .obs = o,
+                    .ts_ms = now,
+                }) catch return;
             }
         },
         else => {},

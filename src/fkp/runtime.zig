@@ -226,7 +226,7 @@ fn runOneFkpCycle(rt: *Runtime) void {
 
     // 上流ごとの snapshot を一旦保持 (deinit で arena が解放)
     for (rt.upstreams) |u| {
-        const snap = u.takeSnapshotAndReset(alloc) catch continue;
+        const snap = u.takeSnapshot(alloc) catch continue;
         if (snap.coord == null or snap.phase_list.len == 0) continue;
 
         // PhaseObs → SatObs に変換
