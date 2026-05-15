@@ -17,6 +17,7 @@ const parser = @import("../config/parser.zig");
 const server = @import("../server.zig");
 const source_mod = @import("../ntrip/source.zig");
 const log_mod = @import("../log.zig");
+const relay = @import("../relay/engine.zig");
 const engine = @import("engine.zig");
 const type59 = @import("type59.zig");
 const upstream_mod = @import("upstream.zig");
@@ -61,13 +62,33 @@ pub const Runtime = struct {
         const rt = try alloc.create(Runtime);
         errdefer alloc.destroy(rt);
 
+        // mountpoint 名は内部レジストリ的には先頭 "/" 込み (normal source も同様)。
+        // 設定で "/" 抜きでも自動補完する。
+        const mount_with_slash = if (cfg.fkp_mountpoint[0] == '/')
+            cfg.fkp_mountpoint
+        else blk: {
+            const buf = try alloc.alloc(u8, cfg.fkp_mountpoint.len + 1);
+            buf[0] = '/';
+            @memcpy(buf[1..], cfg.fkp_mountpoint);
+            break :blk buf;
+        };
+
         // 仮想 Source を作って登録 (peer_addr はダミー 0.0.0.0:0)
         const dummy_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
-        const virt = try source_mod.Source.create(alloc, cfg.fkp_mountpoint, dummy_addr);
+        const virt = try source_mod.Source.create(alloc, mount_with_slash, dummy_addr);
         errdefer virt.destroy();
         virt.rtcm_detected = true;  // 主上流の RTCM3 を流すので最初から true
         try state.registerSource(virt);
-        errdefer state.unregisterSource(cfg.fkp_mountpoint);
+        errdefer state.unregisterSource(mount_with_slash);
+
+        // クライアント認証用に config.mounts にもオープン登録しておく
+        // (authenticateClient が config.mounts.get() しないと弾く設計のため)
+        // 注: config.mounts の MountAuth 型は parser モジュール内に隠蔽されていないので、
+        //     直接 put する。なぜ FKP runtime が config を mutate するか? = 設計の妥協。
+        const auth_kv = parser.MountAuth{ .open = true, .users = &.{} };
+        // config は *const Config として渡されているので mut にするため @constCast
+        var cfg_mut: *parser.Config = @constCast(state.config);
+        cfg_mut.mounts.put(mount_with_slash, auth_kv) catch {};
 
         // 上流クライアント生成
         const ups = try alloc.alloc(*upstream_mod.Upstream, cfg.fkp_sources.len);
@@ -83,6 +104,8 @@ pub const Runtime = struct {
                 .mount = src.mountpoint,
                 .user = src.user,
                 .pass = src.password,
+                .gga_lat_deg = cfg.fkp_gga_lat,
+                .gga_lon_deg = cfg.fkp_gga_lon,
             };
             ups[i] = try upstream_mod.Upstream.create(alloc, ucfg, state.logger);
             initialized += 1;
@@ -139,8 +162,8 @@ pub const Runtime = struct {
 
     pub fn destroy(self: *Runtime) void {
         // shutdown() を呼び済みであることを前提
-        // 仮想 source を state から外す
-        self.state.unregisterSource(self.cfg.fkp_mountpoint);
+        // 仮想 source を state から外す (virtual_src.mount は "/" 込みで保管済み)
+        self.state.unregisterSource(self.virtual_src.mount);
         // 現在接続中の下流クライアントが居れば clientLoop が抜けるのを待つ
         // (source.zig handleSource() と同じパターン)
         var waited: u32 = 0;
@@ -166,7 +189,7 @@ fn primaryPassthrough(ctx: *anyopaque, data: []const u8) void {
 /// 仮想 Source に書き込む共通処理。RingBuffer 1 chunk == 4096 byte なので
 /// 4096 を超える場合は分割する。bytes_in / last_data_at_ms も更新。
 fn writeToVirtual(rt: *Runtime, data: []const u8) void {
-    const chunk_size = @import("../relay/engine.zig").RingBuffer.CHUNK_SIZE;
+    const chunk_size = relay.RingBuffer.CHUNK_SIZE;
     var off: usize = 0;
     while (off < data.len) {
         const end = @min(off + chunk_size, data.len);

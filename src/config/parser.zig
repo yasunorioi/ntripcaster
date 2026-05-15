@@ -87,6 +87,12 @@ pub const Config = struct {
     fkp_mountpoint: []const u8 = "",
     /// FKP 計算間隔 [秒]
     fkp_interval: u32 = 1,
+    /// 上流接続時に送る合成 GGA の緯度 [deg]。
+    /// rtk2go.com のように NMEA=1 (GGA 必須) マウントに繋ぐ場合のみ意味を持つ。
+    /// 0.0 のとき送信しない。VRS ではなく FKP 用途なので「網セル中心付近」を入れれば良い。
+    fkp_gga_lat: f64 = 0.0,
+    /// 上流接続時に送る合成 GGA の経度 [deg]
+    fkp_gga_lon: f64 = 0.0,
 
     /// HashMap を解放する。文字列値の解放は呼び出し元の Arena に委ねる。
     pub fn deinit(self: *Config) void {
@@ -286,6 +292,10 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
             config.fkp_mountpoint = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "fkp_interval")) {
             config.fkp_interval = std.fmt.parseInt(u32, value, 10) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "fkp_gga_lat")) {
+            config.fkp_gga_lat = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "fkp_gga_lon")) {
+            config.fkp_gga_lon = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
         }
         // 未知のキーは無視（前方互換性）
     }

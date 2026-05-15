@@ -27,6 +27,11 @@ pub const Config = struct {
     max_backoff_ms: u64 = 60 * std.time.ms_per_s,
     /// データ無音タイムアウト (これを超えると切断扱い)
     data_timeout_ms: u64 = 30 * std.time.ms_per_s,
+    /// GET 直後に送る合成 GGA の緯度 [deg]。0.0 のとき送信しない。
+    /// rtk2go.com のように NMEA=1 (GGA 必須) マウントに繋ぐとき使う。
+    gga_lat_deg: f64 = 0.0,
+    /// GGA の経度 [deg]。0.0 のとき送信しない。
+    gga_lon_deg: f64 = 0.0,
 };
 
 /// 上流から渡されたスナップショット。`takeSnapshotAndReset()` で取り出す。
@@ -75,6 +80,8 @@ pub const Upstream = struct {
                 .initial_backoff_ms = cfg.initial_backoff_ms,
                 .max_backoff_ms = cfg.max_backoff_ms,
                 .data_timeout_ms = cfg.data_timeout_ms,
+                .gga_lat_deg = cfg.gga_lat_deg,
+                .gga_lon_deg = cfg.gga_lon_deg,
             },
             .logger = logger,
             .lock = .{},
@@ -194,10 +201,29 @@ fn sleepInterruptible(self: *Upstream, ms: u64) void {
     }
 }
 
+/// socket に SO_RCVTIMEO を設定する。secs == 0 で無効化。
+fn setRecvTimeout(stream: std.net.Stream, secs: u32) !void {
+    const tv = std.posix.timeval{
+        .sec = @intCast(secs),
+        .usec = 0,
+    };
+    const bytes = std.mem.asBytes(&tv);
+    try std.posix.setsockopt(
+        stream.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVTIMEO,
+        bytes,
+    );
+}
+
 /// NTRIP caster に GET 接続 → ICY 200 OK 確認まで
 fn connect(self: *Upstream) !std.net.Stream {
     const stream = try std.net.tcpConnectToHost(self.alloc, self.cfg.host, self.cfg.port);
     errdefer stream.close();
+
+    // ICY 待ち中に上流が応答しないと無限ハングするので、接続フェーズだけ短い
+    // read timeout を入れる (15 秒)。読み始めたら無音検出は data_timeout_ms に任せる。
+    setRecvTimeout(stream, 15) catch {};
 
     // GET リクエスト送信
     try sendGet(self, stream);
@@ -205,7 +231,63 @@ fn connect(self: *Upstream) !std.net.Stream {
     // ICY 200 OK を待つ
     try waitIcy(stream);
 
+    // NMEA=1 マウント (rtk2go 等) は GGA 受信まで RTCM3 を流さないので、
+    // gga_lat/gga_lon が指定されているときは合成 GGA を送る。
+    if (self.cfg.gga_lat_deg != 0.0 or self.cfg.gga_lon_deg != 0.0) {
+        sendGga(self, stream) catch |err| {
+            self.logger.warn("[upstream {s}] GGA send failed: {}", .{ self.cfg.mount, err });
+        };
+    }
+
+    // 読み込みフェーズに入ったら timeout を長めに (ストール検知は data_timeout_ms で別途)
+    setRecvTimeout(stream, @intCast(self.cfg.data_timeout_ms / 1000 + 5)) catch {};
+
     return stream;
+}
+
+/// 合成 NMEA GGA を送信する (rtk2go の NMEA=1 マウントを「開ける」ための嘘 GGA)。
+fn sendGga(self: *Upstream, stream: std.net.Stream) !void {
+    var buf: [128]u8 = undefined;
+    const sentence = formatGga(&buf, self.cfg.gga_lat_deg, self.cfg.gga_lon_deg) orelse return;
+    try stream.writeAll(sentence);
+    self.logger.info("[upstream {s}] sent GGA (lat={d:.4} lon={d:.4})", .{
+        self.cfg.mount, self.cfg.gga_lat_deg, self.cfg.gga_lon_deg,
+    });
+}
+
+/// `$GPGGA,...*XX\r\n` を組み立てる。返り値は buf 内のスライス。
+/// 失敗時 (buf 不足) は null。
+fn formatGga(buf: []u8, lat_deg: f64, lon_deg: f64) ?[]const u8 {
+    // ddmm.mmmm 形式に変換
+    const lat_abs = @abs(lat_deg);
+    const lat_deg_i: u32 = @intFromFloat(@floor(lat_abs));
+    const lat_min: f64 = (lat_abs - @as(f64, @floatFromInt(lat_deg_i))) * 60.0;
+    const lat_ns: u8 = if (lat_deg >= 0) 'N' else 'S';
+
+    const lon_abs = @abs(lon_deg);
+    const lon_deg_i: u32 = @intFromFloat(@floor(lon_abs));
+    const lon_min: f64 = (lon_abs - @as(f64, @floatFromInt(lon_deg_i))) * 60.0;
+    const lon_ew: u8 = if (lon_deg >= 0) 'E' else 'W';
+
+    // チェックサム前まで組み立て
+    var fbs = std.io.fixedBufferStream(buf);
+    const w = fbs.writer();
+
+    // GGA ペイロード ($ と *xx 以外を生成してチェックサム計算)
+    const payload_start: usize = 1;  // '$' の後
+    w.writeByte('$') catch return null;
+    std.fmt.format(w, "GPGGA,000000.00,{d:0>2}{d:07.4},{c},{d:0>3}{d:07.4},{c},1,08,0.9,0.0,M,46.9,M,,", .{
+        lat_deg_i, lat_min, lat_ns, lon_deg_i, lon_min, lon_ew,
+    }) catch return null;
+
+    const pos_before_star = fbs.pos;
+
+    // XOR チェックサム ($ と * の間)
+    var cs: u8 = 0;
+    for (buf[payload_start..pos_before_star]) |b| cs ^= b;
+
+    std.fmt.format(w, "*{X:0>2}\r\n", .{cs}) catch return null;
+    return buf[0..fbs.pos];
 }
 
 fn sendGet(self: *Upstream, stream: std.net.Stream) !void {
