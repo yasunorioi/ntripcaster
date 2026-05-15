@@ -7,6 +7,7 @@ const std = @import("std");
 const parser = @import("config/parser.zig");
 const server_mod = @import("server.zig");
 const admin_server = @import("admin/server.zig");
+const fkp_runtime = @import("fkp/runtime.zig");
 
 const usage =
     \\Usage: ntripcaster [-c <configfile>] [-h]
@@ -113,6 +114,35 @@ pub fn main() !void {
         admin.shutdown();
         if (admin_thread) |t| t.join();
     }
+
+    // ── FKP runtime ────────────────────────────────────────────────────────
+    // fkp_enable=true かつ 3 局以上の fkp_source、かつ fkp_mountpoint が
+    // 指定されている場合に仮想 mountpoint を立ち上げる。条件未達なら警告
+    // ログだけ出して通常 caster として動作。
+    var fkp_rt: ?*fkp_runtime.Runtime = null;
+    if (config.fkp_enable and config.fkp_sources.len >= 3 and config.fkp_mountpoint.len > 0) {
+        fkp_rt = fkp_runtime.Runtime.create(allocator, &state) catch |err| blk: {
+            state.logger.err("fkp runtime create failed: {}", .{err});
+            break :blk null;
+        };
+        if (fkp_rt) |rt| {
+            rt.start() catch |err| {
+                state.logger.err("fkp runtime start failed: {}", .{err});
+                rt.shutdown();
+                rt.destroy();
+                fkp_rt = null;
+            };
+        }
+    } else if (config.fkp_enable) {
+        state.logger.warn(
+            "fkp_enable=true but fkp_sources={d} (need >=3) or fkp_mountpoint empty; FKP inactive",
+            .{config.fkp_sources.len},
+        );
+    }
+    defer if (fkp_rt) |rt| {
+        rt.shutdown();
+        rt.destroy();
+    };
 
     // ── サーバー起動（SIGINT/SIGTERM で終了） ───────────────────────────────
     server_mod.listen(&state) catch |err| {

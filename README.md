@@ -24,10 +24,12 @@ subgraph group_runtime["Zig runtime"]
   node_client(("Client<br/>egress session<br/>[client.zig]"))
   node_protocol["Protocol<br/>[protocol.zig]"]
   node_sourcetable["Sourcetable<br/>directory view<br/>[sourcetable.zig]"]
-  node_fkp_engine{{"FKP engine<br/>virtual mountpoint<br/>[engine.zig]"}}
-  node_fkp_msm7["MSM7<br/>phase extractor<br/>[msm7.zig]"]
-  node_fkp_type59["Type 59<br/>encoder<br/>[type59.zig]"]
-  node_fkp_bits["Bits<br/>bit helpers<br/>[bits.zig]"]
+  node_fkp_engine{{"FKP engine<br/>compute params<br/>[fkp/engine.zig]"}}
+  node_fkp_msm7["MSM7<br/>phase extractor<br/>[fkp/msm7.zig]"]
+  node_fkp_type59["Type 59<br/>encoder<br/>[fkp/type59.zig]"]
+  node_fkp_bits["Bits<br/>bit helpers<br/>[fkp/bits.zig]"]
+  node_fkp_upstream(("Upstream<br/>NTRIP rover<br/>[fkp/upstream.zig]"))
+  node_fkp_runtime{{"FKP runtime<br/>orchestrator<br/>[fkp/runtime.zig]"}}
 end
 
 subgraph group_admin["Admin HTTP / UI"]
@@ -71,8 +73,12 @@ node_sourcetable -->|"reflects"| node_source
 node_fkp_engine -->|"consumes"| node_fkp_msm7
 node_fkp_engine -->|"encodes"| node_fkp_type59
 node_fkp_type59 -->|"uses"| node_fkp_bits
-node_fkp_engine -.->|"aggregates"| node_source
-node_fkp_engine -.->|"exposes"| node_client
+node_main -->|"spawns"| node_fkp_runtime
+node_fkp_runtime -->|"connects via"| node_fkp_upstream
+node_fkp_upstream -->|"extracts via"| node_fkp_msm7
+node_fkp_runtime -->|"computes via"| node_fkp_engine
+node_fkp_runtime -->|"registers virtual"| node_source
+node_fkp_runtime -->|"writes via"| node_relay
 node_main -->|"spawns"| node_admin_server
 node_admin_server -->|"snapshots"| node_server
 node_admin_server -->|"serializes via"| node_admin_stats
@@ -108,6 +114,8 @@ click node_fkp_engine "https://github.com/yasunorioi/ntripcaster/blob/master/src
 click node_fkp_msm7 "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/msm7.zig"
 click node_fkp_type59 "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/type59.zig"
 click node_fkp_bits "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/bits.zig"
+click node_fkp_upstream "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/upstream.zig"
+click node_fkp_runtime "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/runtime.zig"
 click node_legacy_main "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/main.c"
 click node_legacy_source "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/source.c"
 click node_legacy_client "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/client.c"
@@ -126,7 +134,7 @@ classDef toneMint fill:#dcfce7,stroke:#16a34a,stroke-width:1.5px,color:#14532d
 classDef toneRose fill:#ffe4e6,stroke:#e11d48,stroke-width:1.5px,color:#881337
 classDef toneIndigo fill:#e0e7ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81
 classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
-class node_main,node_lib,node_server,node_auth,node_source,node_rtcm3,node_relay,node_client,node_protocol,node_sourcetable,node_fkp_engine,node_fkp_msm7,node_fkp_type59,node_fkp_bits toneBlue
+class node_main,node_lib,node_server,node_auth,node_source,node_rtcm3,node_relay,node_client,node_protocol,node_sourcetable,node_fkp_engine,node_fkp_msm7,node_fkp_type59,node_fkp_bits,node_fkp_upstream,node_fkp_runtime toneBlue
 class node_admin_server,node_admin_stats,node_admin_ui toneIndigo
 class node_build,node_config,node_log toneAmber
 class node_legacy_main,node_legacy_source,node_legacy_client,node_legacy_log toneMint
@@ -141,7 +149,7 @@ class node_tests,node_interop,node_demo toneRose
 - Connection limit enforcement (max_clients / max_clients_per_source / max_sources)
 - Dynamic sourcetable generation from active sources
 - RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection)
-- FKP (Flächenkorrekturparameter) computation engine for Network RTK
+- **FKP (Flächenkorrekturparameter) live service** — 3+ NTRIP 上流に接続し、主上流の生 RTCM3 + 定期注入 Type 59 を仮想 mountpoint として配信 (Network RTK)
 - **Admin UI + JSON API** (`/api/v1/{status,sources,clients,events}`) with SSE live updates and embedded vanilla-JS dashboard
 - Per-connection telemetry: peer address, bytes_in/out, started_at, last_data_at, per-source RTCM3 message-type counts
 - Cross-compile ready: `x86_64-linux-musl`, `aarch64-linux-musl`, `arm-linux-musleabihf`, `mipsel-linux-musl`
@@ -249,6 +257,26 @@ fkp_interval 1
 ```
 
 詳細は [`conf/ntripcaster.conf`](conf/ntripcaster.conf) を参照。
+
+### FKP runtime の動作
+
+`fkp_enable=true` かつ `fkp_sources` が 3 局以上、かつ `fkp_mountpoint` が指定されているとき、起動時に **FKP runtime** スレッド (`src/fkp/runtime.zig`) が立ち上がる:
+
+1. **上流接続維持**: 各 `fkp_source` に対して `src/fkp/upstream.zig` の `Upstream` が NTRIP GET 接続を張る (指数バックオフ再接続付き)。各上流の RTCM3 を継続的に受信し、1005/1006 を見つけたら基準局座標を保存、1077/1087/1097 (MSM7) を見つけたら搬送波位相を蓄積する。
+2. **主上流パススルー**: `fkp_sources[0]` (主上流) からの生 RTCM3 バイトを **そのまま** 仮想 mountpoint (`fkp_mountpoint`) の `RingBuffer` に流す。下流クライアントは通常の NTRIP GET でこの mountpoint に subscribe するだけで、主上流の MSM7/1005/ephemeris 等が透過的に届く。
+3. **FKP 計算 + Type 59 注入**: `fkp_interval` 秒ごとに 3 局以上のスナップショットを取り、`fkp/engine.zig::computeFkp()` で N_I/E_I/N_0/E_0 を算出 → `fkp/type59.zig::encodeType59()` でフレーム化 → 同じ仮想 mountpoint に注入する。
+
+結果として、rover は単一の mountpoint (`GET /FKP_REGION`) で主上流の生 RTCM3 + FKP 補正の両方を受け取る、Network RTK サービスとして機能する完全な配信になる。
+
+ローカル動作確認:
+
+```bash
+zig build
+./zig-out/bin/ntripcaster -c conf/ntripcaster.conf &
+nc localhost 2101 < /dev/null  # SOURCETABLE 取得で /FKP_REGION が STR 行として出るか確認
+```
+
+仮想 mountpoint は通常の Source と同じく `/api/v1/sources` にも出る (peer は 0.0.0.0:0、bytes_in は累積、msg_types に 59 + 主上流のメッセージタイプ)。
 
 ## 管理 UI / API
 

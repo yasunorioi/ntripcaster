@@ -1,0 +1,359 @@
+//! src/fkp/upstream.zig — 単一上流 NTRIP クライアント (FKP runtime 用)
+//!
+//! 1 つの NTRIP caster に rover として GET 接続し、RTCM3 ストリームを継続的に
+//! 受信する。受信中に:
+//!   - 1005 / 1006 を見つけたら基準局座標を保存
+//!   - 1077 / 1087 / 1097 (MSM7) を見つけたら搬送波位相観測値を蓄積
+//!   - 任意のパススルー callback があれば、受信生バイトを丸ごと渡す
+//!     (主上流の生 RTCM3 を仮想 mountpoint に流すために使う)
+//!
+//! 切断時は指数バックオフで再接続する。`stop()` で終了。
+
+const std = @import("std");
+const msm7 = @import("msm7.zig");
+const rtcm3 = @import("../ntrip/rtcm3.zig");
+const log_mod = @import("../log.zig");
+
+/// 設定
+pub const Config = struct {
+    host: []const u8,
+    port: u16 = 2101,
+    mount: []const u8,
+    user: []const u8 = "",
+    pass: []const u8 = "",
+    /// 接続失敗時の初回バックオフ
+    initial_backoff_ms: u64 = 2 * std.time.ms_per_s,
+    /// 上限バックオフ
+    max_backoff_ms: u64 = 60 * std.time.ms_per_s,
+    /// データ無音タイムアウト (これを超えると切断扱い)
+    data_timeout_ms: u64 = 30 * std.time.ms_per_s,
+};
+
+/// 上流から渡されたスナップショット。`takeSnapshotAndReset()` で取り出す。
+/// `phase_list` は caller-allocated。read 後に caller が free する。
+pub const Snapshot = struct {
+    coord: ?msm7.StationCoord,
+    /// 累積された PhaseObs。allocator で割り当て済み。
+    phase_list: []msm7.PhaseObs,
+};
+
+/// パススルー callback: raw RTCM3 バイトをそのまま転送する。
+/// 主上流のみで使う (仮想 mountpoint への注入)。
+pub const PassthroughFn = *const fn (ctx: *anyopaque, data: []const u8) void;
+
+pub const Upstream = struct {
+    alloc: std.mem.Allocator,
+    cfg: Config,
+    logger: log_mod.Logger,
+
+    /// 蓄積バッファ (lock で保護)
+    lock: std.Thread.Mutex,
+    coord: ?msm7.StationCoord,
+    phase_list: std.ArrayList(msm7.PhaseObs),
+
+    /// 受信ライフサイクル
+    active: std.atomic.Value(bool),
+    last_data_at_ms: i64,
+
+    /// パススルー設定 (主上流のみ非 null)
+    passthrough_ctx: ?*anyopaque,
+    passthrough_fn: ?PassthroughFn,
+
+    /// スレッド (start() で spawn、stop()/join() で終了)
+    thread: ?std.Thread,
+
+    pub fn create(alloc: std.mem.Allocator, cfg: Config, logger: log_mod.Logger) !*Upstream {
+        const u = try alloc.create(Upstream);
+        u.* = .{
+            .alloc = alloc,
+            .cfg = .{
+                .host = try alloc.dupe(u8, cfg.host),
+                .port = cfg.port,
+                .mount = try alloc.dupe(u8, cfg.mount),
+                .user = try alloc.dupe(u8, cfg.user),
+                .pass = try alloc.dupe(u8, cfg.pass),
+                .initial_backoff_ms = cfg.initial_backoff_ms,
+                .max_backoff_ms = cfg.max_backoff_ms,
+                .data_timeout_ms = cfg.data_timeout_ms,
+            },
+            .logger = logger,
+            .lock = .{},
+            .coord = null,
+            .phase_list = .{},
+            .active = std.atomic.Value(bool).init(true),
+            .last_data_at_ms = std.time.milliTimestamp(),
+            .passthrough_ctx = null,
+            .passthrough_fn = null,
+            .thread = null,
+        };
+        return u;
+    }
+
+    pub fn destroy(self: *Upstream) void {
+        self.lock.lock();
+        self.phase_list.deinit(self.alloc);
+        self.lock.unlock();
+        self.alloc.free(self.cfg.host);
+        self.alloc.free(self.cfg.mount);
+        self.alloc.free(self.cfg.user);
+        self.alloc.free(self.cfg.pass);
+        self.alloc.destroy(self);
+    }
+
+    pub fn setPassthrough(self: *Upstream, ctx: *anyopaque, cb: PassthroughFn) void {
+        self.passthrough_ctx = ctx;
+        self.passthrough_fn = cb;
+    }
+
+    /// バックグラウンドスレッド開始
+    pub fn start(self: *Upstream) !void {
+        self.thread = try std.Thread.spawn(.{}, runLoop, .{self});
+    }
+
+    /// 終了通知 + join (呼び出し側スレッドをブロックする)
+    pub fn stop(self: *Upstream) void {
+        self.active.store(false, .seq_cst);
+        if (self.thread) |t| {
+            t.join();
+            self.thread = null;
+        }
+    }
+
+    /// 現在の蓄積を取り出して内部をクリアする。caller が phase_list を free。
+    pub fn takeSnapshotAndReset(self: *Upstream, alloc: std.mem.Allocator) !Snapshot {
+        self.lock.lock();
+        defer self.lock.unlock();
+
+        const out_list = try alloc.alloc(msm7.PhaseObs, self.phase_list.items.len);
+        @memcpy(out_list, self.phase_list.items);
+        self.phase_list.clearRetainingCapacity();
+
+        return .{
+            .coord = self.coord,
+            .phase_list = out_list,
+        };
+    }
+
+    /// 直近受信からの経過 ms (新しさのチェック用)
+    pub fn millisSinceLastData(self: *Upstream) i64 {
+        self.lock.lock();
+        defer self.lock.unlock();
+        return std.time.milliTimestamp() - self.last_data_at_ms;
+    }
+};
+
+// ── 内部 ──────────────────────────────────────────────────────────────────
+
+fn runLoop(self: *Upstream) void {
+    var backoff_ms: u64 = 0;
+
+    while (self.active.load(.seq_cst)) {
+        // 接続
+        const stream = connect(self) catch |err| {
+            self.logger.warn(
+                "[upstream {s}] connect failed: {}, backoff {d}ms",
+                .{ self.cfg.mount, err, @max(backoff_ms, self.cfg.initial_backoff_ms) },
+            );
+            backoff_ms = nextBackoff(backoff_ms, self.cfg);
+            sleepInterruptible(self, backoff_ms);
+            continue;
+        };
+        defer stream.close();
+
+        self.logger.info("[upstream {s}] connected to {s}:{d}", .{
+            self.cfg.mount, self.cfg.host, self.cfg.port,
+        });
+        backoff_ms = 0;
+        self.lock.lock();
+        self.last_data_at_ms = std.time.milliTimestamp();
+        self.lock.unlock();
+
+        // 受信ループ
+        readLoop(self, stream);
+
+        self.logger.warn("[upstream {s}] disconnected", .{self.cfg.mount});
+        backoff_ms = nextBackoff(backoff_ms, self.cfg);
+        sleepInterruptible(self, backoff_ms);
+    }
+}
+
+fn nextBackoff(prev_ms: u64, cfg: Config) u64 {
+    if (prev_ms == 0) return cfg.initial_backoff_ms;
+    const doubled = prev_ms *| 2;
+    return @min(doubled, cfg.max_backoff_ms);
+}
+
+/// `active=false` を尊重しながら最大 ms 待機 (細かいスリープに分割)
+fn sleepInterruptible(self: *Upstream, ms: u64) void {
+    var remaining: u64 = ms;
+    const tick: u64 = 100;
+    while (remaining > 0 and self.active.load(.seq_cst)) {
+        const this_sleep: u64 = @min(remaining, tick);
+        std.Thread.sleep(this_sleep * @as(u64, std.time.ns_per_ms));
+        remaining -= this_sleep;
+    }
+}
+
+/// NTRIP caster に GET 接続 → ICY 200 OK 確認まで
+fn connect(self: *Upstream) !std.net.Stream {
+    const stream = try std.net.tcpConnectToHost(self.alloc, self.cfg.host, self.cfg.port);
+    errdefer stream.close();
+
+    // GET リクエスト送信
+    try sendGet(self, stream);
+
+    // ICY 200 OK を待つ
+    try waitIcy(stream);
+
+    return stream;
+}
+
+fn sendGet(self: *Upstream, stream: std.net.Stream) !void {
+    var req_buf: [768]u8 = undefined;
+
+    if (self.cfg.user.len > 0) {
+        // Basic 認証
+        const cred_fmt = try std.fmt.allocPrint(
+            self.alloc,
+            "{s}:{s}",
+            .{ self.cfg.user, self.cfg.pass },
+        );
+        defer self.alloc.free(cred_fmt);
+
+        const encoder = std.base64.standard.Encoder;
+        var auth_b64: [256]u8 = undefined;
+        const encoded_len = encoder.calcSize(cred_fmt.len);
+        if (encoded_len > auth_b64.len) return error.AuthTooLong;
+        _ = encoder.encode(auth_b64[0..encoded_len], cred_fmt);
+
+        const req = try std.fmt.bufPrint(
+            &req_buf,
+            "GET /{s} HTTP/1.0\r\n" ++
+                "Host: {s}:{d}\r\n" ++
+                "Ntrip-Version: Ntrip/1.0\r\n" ++
+                "User-Agent: NTRIP NtripCasterFkp/0.3\r\n" ++
+                "Authorization: Basic {s}\r\n" ++
+                "\r\n",
+            .{ self.cfg.mount, self.cfg.host, self.cfg.port, auth_b64[0..encoded_len] },
+        );
+        try stream.writeAll(req);
+    } else {
+        const req = try std.fmt.bufPrint(
+            &req_buf,
+            "GET /{s} HTTP/1.0\r\n" ++
+                "Host: {s}:{d}\r\n" ++
+                "Ntrip-Version: Ntrip/1.0\r\n" ++
+                "User-Agent: NTRIP NtripCasterFkp/0.3\r\n" ++
+                "\r\n",
+            .{ self.cfg.mount, self.cfg.host, self.cfg.port },
+        );
+        try stream.writeAll(req);
+    }
+}
+
+fn waitIcy(stream: std.net.Stream) !void {
+    var buf: [256]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = try stream.read(buf[total..]);
+        if (n == 0) return error.UpstreamClosed;
+        total += n;
+        if (std.mem.indexOf(u8, buf[0..total], "ICY 200 OK") != null) return;
+        // HTTP/1.0 200 OK も許容 (一部 caster は HTTP/1.x で応答)
+        if (std.mem.indexOf(u8, buf[0..total], "HTTP/1.0 200") != null) return;
+        if (std.mem.indexOf(u8, buf[0..total], "HTTP/1.1 200") != null) return;
+        if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n") != null) return error.NotIcy200;
+    }
+    return error.NotIcy200;
+}
+
+/// 受信生バイトを取り込み、パススルー callback と RTCM3 パーサーに投入する。
+fn readLoop(self: *Upstream, stream: std.net.Stream) void {
+    var read_buf: [4096]u8 = undefined;
+    // RTCM3 パース用バッファ (チャンク跨ぎ対応)
+    var parse_buf: [8192]u8 = undefined;
+    var parse_len: usize = 0;
+
+    while (self.active.load(.seq_cst)) {
+        const n = stream.read(&read_buf) catch break;
+        if (n == 0) break; // 接続閉鎖
+
+        const chunk = read_buf[0..n];
+
+        // パススルー (主上流のみ)
+        if (self.passthrough_fn) |cb| {
+            cb(self.passthrough_ctx.?, chunk);
+        }
+
+        // 受信時刻更新
+        self.lock.lock();
+        self.last_data_at_ms = std.time.milliTimestamp();
+        self.lock.unlock();
+
+        // RTCM3 パース用バッファに追記 (溢れたら先頭を破棄)
+        if (parse_len + chunk.len > parse_buf.len) {
+            const carry = parse_buf.len / 2;
+            std.mem.copyForwards(u8, parse_buf[0..carry], parse_buf[parse_len - carry .. parse_len]);
+            parse_len = carry;
+        }
+        @memcpy(parse_buf[parse_len .. parse_len + chunk.len], chunk);
+        parse_len += chunk.len;
+
+        // フレームスキャン → 1005/1006/1077/1087/1097 を処理
+        var pos: usize = 0;
+        while (pos < parse_len) {
+            if (parse_buf[pos] != rtcm3.PREAMBLE) {
+                pos += 1;
+                continue;
+            }
+            const fr = rtcm3.parseFrame(parse_buf[pos..]) orelse {
+                if (parse_len - pos < 6) break; // ヘッダ未到達
+                pos += 1;
+                continue;
+            };
+            const payload = parse_buf[pos + 3 .. pos + fr.consumed - 3];
+            handleFrame(self, fr.msg_type, payload);
+            pos += fr.consumed;
+        }
+
+        // 消費済みシフト
+        const remaining = parse_len - pos;
+        if (remaining > 0 and pos > 0) {
+            std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[pos..parse_len]);
+        }
+        parse_len = remaining;
+
+        // データ無音タイムアウト
+        if (self.millisSinceLastData() > @as(i64, @intCast(self.cfg.data_timeout_ms))) {
+            self.logger.warn("[upstream {s}] stall {d}ms, reconnect", .{
+                self.cfg.mount,
+                self.millisSinceLastData(),
+            });
+            break;
+        }
+    }
+}
+
+fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
+    switch (msg_type) {
+        1005, 1006 => {
+            if (msm7.parseMsg1005(payload)) |coord| {
+                self.lock.lock();
+                self.coord = coord;
+                self.lock.unlock();
+            }
+        },
+        1077, 1087, 1097 => {
+            // MSM7 の搬送波位相を抽出して蓄積
+            const obs = msm7.extractPhase(self.alloc, payload) catch return;
+            defer self.alloc.free(obs);
+
+            self.lock.lock();
+            defer self.lock.unlock();
+            for (obs) |o| {
+                self.phase_list.append(self.alloc, o) catch return;
+            }
+        },
+        else => {},
+    }
+}

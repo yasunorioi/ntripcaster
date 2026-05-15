@@ -20,6 +20,8 @@ pub const fkp = struct {
     pub const msm7 = @import("fkp/msm7.zig");
     pub const engine = @import("fkp/engine.zig");
     pub const type59 = @import("fkp/type59.zig");
+    pub const upstream = @import("fkp/upstream.zig");
+    pub const runtime = @import("fkp/runtime.zig");
 };
 
 pub const admin = struct {
