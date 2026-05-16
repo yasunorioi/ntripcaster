@@ -22,6 +22,7 @@ pub const fkp = struct {
     pub const type59 = @import("fkp/type59.zig");
     pub const upstream = @import("fkp/upstream.zig");
     pub const runtime = @import("fkp/runtime.zig");
+    pub const vrs = @import("fkp/vrs.zig");
 };
 
 pub const admin = struct {

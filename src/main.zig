@@ -8,6 +8,7 @@ const parser = @import("config/parser.zig");
 const server_mod = @import("server.zig");
 const admin_server = @import("admin/server.zig");
 const fkp_runtime = @import("fkp/runtime.zig");
+const fkp_vrs = @import("fkp/vrs.zig");
 
 const usage =
     \\Usage: ntripcaster [-c <configfile>] [-h]
@@ -143,6 +144,26 @@ pub fn main() !void {
         rt.shutdown();
         rt.destroy();
     };
+
+    // ── VRS runtime ────────────────────────────────────────────────────────
+    // vrs_enable=true かつ vrs_mountpoint が指定されているとき、VRS rover を
+    // 受け入れる dispatch を立てる。FKP runtime が動いていることが前提
+    // (主上流 RTCM3 ストリームを使うので)。
+    var vrs_rt: ?*fkp_vrs.Runtime = null;
+    if (config.vrs_enable and config.vrs_mountpoint.len > 0) {
+        if (fkp_rt == null) {
+            state.logger.warn("vrs_enable=true but FKP runtime is not active; VRS disabled", .{});
+        } else {
+            vrs_rt = fkp_vrs.Runtime.create(allocator, &state) catch |err| blk: {
+                state.logger.err("vrs runtime create failed: {}", .{err});
+                break :blk null;
+            };
+            if (vrs_rt) |rt| {
+                state.vrs = rt.handler();
+            }
+        }
+    }
+    defer if (vrs_rt) |rt| rt.destroy();
 
     // ── サーバー起動（SIGINT/SIGTERM で終了） ───────────────────────────────
     server_mod.listen(&state) catch |err| {

@@ -4,6 +4,38 @@ All notable changes to this project are documented here.
 
 ---
 
+## [unreleased] — VRS Phase 4 (work-in-progress, on phase4-vrs branch)
+
+VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注入)
++ 4d (セル境界) を実装。Phase 4c (MSM7 補正適用) は MSM7 エンコーダが必要
+なため未着手 → Phase 5 で対応予定。
+
+- `src/fkp/vrs.zig` 新規 (~400 行): VrsRuntime/VrsRover + GGA ASCII パーサ
+  + 1 rover = 1 スレッドの双方向 TCP ハンドラ + 主上流 RingBuffer からの
+  フレーム単位フィルタ転送 (1005/59 除外) + 仮想 Type 1005 注入 + セル
+  距離チェック (Haversine)
+- `src/fkp/msm7.zig`: `latLonAltToEcef()` + `encodeMsg1005()` 追加
+  (parseMsg1005 の対称ペア)
+- `src/server.zig`: `VrsHandler` dispatch 構造体追加 (循環依存回避用の
+  関数ポインタ抽象)
+- `src/ntrip/client.zig`: VRS mountpoint マッチ時に VrsRuntime に丸投げ
+- `src/main.zig`: VrsRuntime 起動シーケンス (FKP runtime 依存)
+- `src/config/parser.zig`: vrs_enable / vrs_mountpoint / vrs_cell_center_lat
+  / vrs_cell_center_lon / vrs_cell_radius_km / vrs_initial_gga_timeout_sec
+  / vrs_inject_1005_interval_sec
+- `conf/rtk2go-hiroshima.conf`: vrs サンプル設定追加
+- `docs/vrs-design.md`: VRS の設計判断と Phase 分割の根拠
+
+実テスト (rtk2go.com 広島 3 局, VRS_HIROSHIMA mountpoint):
+- ✅ Type 59 = 0 frames (VRS で正しく除外)
+- ✅ 主上流の MSM7/ephemeris/1019/1020/1042 等は透過配信 (1.16 MB / 15s)
+- ⚠️ Type 1005 = 178 frames で ref_id=1 のみ (cell center 座標) — 0x4000+
+  の VRS 注入 ID が観測されない: GGA パース or フィルタのバグ可能性。
+  rtk2go 側がレート制限を発動して再検証ブロック中 → 次セッションで調査
+- ⚠️ `src/fkp/upstream.zig` 長時間稼働後に `parse_len - pos` integer
+  overflow で SIGSEGV。発生条件未特定だが `@min(pos, parse_len)` で防御
+  パッチ済み。根本原因は次セッションで再現させて修正
+
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
 FKP モジュール群を起動時に常時稼働するサービスへ昇格。これまで `tools/fkp_demo.zig` でしか実行できなかった「3 局並列接続 → MSM7 抽出 → FKP 計算 → Type 59 エンコード」を、caster 本体の永続バックグラウンドスレッドに統合した。

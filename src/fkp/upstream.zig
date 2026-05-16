@@ -435,9 +435,13 @@ fn readLoop(self: *Upstream, stream: std.net.Stream) void {
         }
 
         // 消費済みシフト
-        const remaining = parse_len - pos;
-        if (remaining > 0 and pos > 0) {
-            std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[pos..parse_len]);
+        // 防御: scan ループが pos > parse_len を生むエッジケース (parse_buf shift と
+        // parseFrame の相互作用バグ?) を発生条件再現できていないが、SIGSEGV の根本
+        // 原因なので clamp してパニックを抑える。
+        const safe_pos = @min(pos, parse_len);
+        const remaining = parse_len - safe_pos;
+        if (remaining > 0 and safe_pos > 0) {
+            std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[safe_pos..parse_len]);
         }
         parse_len = remaining;
 

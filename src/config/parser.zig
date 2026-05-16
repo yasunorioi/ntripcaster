@@ -94,6 +94,22 @@ pub const Config = struct {
     /// 上流接続時に送る合成 GGA の経度 [deg]
     fkp_gga_lon: f64 = 0.0,
 
+    // ── VRS 設定 ──────────────────────────────────────────────────────────
+    /// true = VRS 機能を有効にする (要 fkp_enable も true)
+    vrs_enable: bool = false,
+    /// rover に公開する VRS mountpoint 名 (例: "/VRS_AUTO")
+    vrs_mountpoint: []const u8 = "",
+    /// セル中心緯度 [deg]。rover がこの点から radius_km 以上離れたら切断。
+    /// 0.0 のとき距離チェック無効。
+    vrs_cell_center_lat: f64 = 0.0,
+    vrs_cell_center_lon: f64 = 0.0,
+    /// セル半径 [km] (距離チェック)
+    vrs_cell_radius_km: f64 = 50.0,
+    /// rover が初回 GGA を送るまでの待機時間 [秒]
+    vrs_initial_gga_timeout_sec: u32 = 60,
+    /// 仮想 Type 1005 を rover に注入する間隔 [秒]
+    vrs_inject_1005_interval_sec: u32 = 5,
+
     /// HashMap を解放する。文字列値の解放は呼び出し元の Arena に委ねる。
     pub fn deinit(self: *Config) void {
         self.mounts.deinit();
@@ -296,6 +312,20 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
             config.fkp_gga_lat = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
         } else if (std.mem.eql(u8, key, "fkp_gga_lon")) {
             config.fkp_gga_lon = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "vrs_enable")) {
+            config.vrs_enable = std.mem.eql(u8, value, "true");
+        } else if (std.mem.eql(u8, key, "vrs_mountpoint")) {
+            config.vrs_mountpoint = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "vrs_cell_center_lat")) {
+            config.vrs_cell_center_lat = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "vrs_cell_center_lon")) {
+            config.vrs_cell_center_lon = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "vrs_cell_radius_km")) {
+            config.vrs_cell_radius_km = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "vrs_initial_gga_timeout_sec")) {
+            config.vrs_initial_gga_timeout_sec = std.fmt.parseInt(u32, value, 10) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "vrs_inject_1005_interval_sec")) {
+            config.vrs_inject_1005_interval_sec = std.fmt.parseInt(u32, value, 10) catch return error.InvalidInteger;
         }
         // 未知のキーは無視（前方互換性）
     }

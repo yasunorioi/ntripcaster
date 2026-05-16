@@ -72,6 +72,14 @@ pub fn handleClient(
     get: protocol.ClientGet,
     peer_addr: std.net.Address,
 ) void {
+    // 0. VRS mountpoint なら専用ハンドラに丸投げ (双方向 TCP + GGA 受信が必要)
+    if (state.vrs) |vh| {
+        if (vh.matches_fn(vh.ctx, get.mount)) {
+            vh.handle_fn(vh.ctx, stream, peer_addr);
+            return;
+        }
+    }
+
     // 1. ソース探索（アクティブなソースがなければ 404）
     const src = state.getSource(get.mount) orelse {
         stream.writeAll("HTTP/1.0 404 Not Found\r\n\r\n") catch {};

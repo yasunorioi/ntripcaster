@@ -18,6 +18,19 @@ const client_mod = @import("ntrip/client.zig");
 pub const Source = source_mod.Source;
 pub const Client = client_mod.Client;
 
+// ── VRS dispatch ──────────────────────────────────────────────────────────────
+//
+// VRS mountpoint は通常の clientLoop (RingBuffer fanout) と異なり、rover ごとの
+// 双方向 TCP + GGA 受信 + 仮想 1005 注入を行う。fkp/vrs.zig がそのロジックを
+// 持つが、server.zig が fkp/vrs.zig を直接 import すると循環依存 (vrs.zig →
+// server.zig) になるので、main.zig が VrsHandler を ServerState に差し込む形に
+// する。
+pub const VrsHandler = struct {
+    ctx: *anyopaque,
+    handle_fn: *const fn (ctx: *anyopaque, stream: std.net.Stream, peer: std.net.Address) void,
+    matches_fn: *const fn (ctx: *anyopaque, mount: []const u8) bool,
+};
+
 // ── ServerState ───────────────────────────────────────────────────────────────
 
 /// 観測専用の Source スナップショット。Mutex 越しに owned コピーを返すための型。
@@ -75,6 +88,8 @@ pub const ServerState = struct {
     listen_address: std.net.Address,
     /// 接続中ハンドラースレッド数（deinit() 内でゼロを待機する）
     active_handlers: std.atomic.Value(u32),
+    /// VRS dispatch (main.zig が VrsRuntime 作成後に差し込む)
+    vrs: ?VrsHandler,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -95,6 +110,7 @@ pub const ServerState = struct {
             .started_event = .{},
             .listen_address = undefined,
             .active_handlers = std.atomic.Value(u32).init(0),
+            .vrs = null,
         };
     }
 

@@ -12,6 +12,7 @@ const std = @import("std");
 const bits = @import("bits.zig");
 
 const BitReader = bits.BitReader;
+const BitWriter = bits.BitWriter;
 
 /// GPS 周波数定数
 pub const GPS_L1_FREQ: f64 = 1575.42e6; // Hz
@@ -291,6 +292,70 @@ pub fn parseMsg1005(payload: []const u8) ?StationCoord {
         .lat = ll[0],
         .lon = ll[1],
     };
+}
+
+/// WGS84 緯度経度高度 [rad, rad, m] → ECEF [m, m, m]
+pub fn latLonAltToEcef(lat: f64, lon: f64, alt: f64) [3]f64 {
+    const a: f64 = 6378137.0;
+    const e2: f64 = 0.00669437999014;
+    const s = @sin(lat);
+    const c = @cos(lat);
+    const N = a / @sqrt(1.0 - e2 * s * s);
+    const x = (N + alt) * c * @cos(lon);
+    const y = (N + alt) * c * @sin(lon);
+    const z = (N * (1.0 - e2) + alt) * s;
+    return .{ x, y, z };
+}
+
+/// RTCM3 Type 1005 (Stationary Antenna Reference Point) フレームを生成する。
+/// ECEF 座標 + Reference Station ID を入力に、parseMsg1005 と対称な構造でエンコード。
+///
+/// `non_physical`: true = "Reference Station Indicator" bit を 1 にする (VRS の自己申告)
+/// 返却値: 完全な RTCM3 フレーム (CRC 含む)。allocator で解放すること。
+pub fn encodeMsg1005(
+    allocator: std.mem.Allocator,
+    ref_station_id: u16,
+    ecef: [3]f64,
+    non_physical: bool,
+) ![]u8 {
+    // payload: 12+12+6+1+1+1+1+38+1+1+38+1+38 = 151 bits = 19 bytes
+    const payload_bytes: usize = 19;
+    const frame_len: usize = 3 + payload_bytes + 3;
+    const buf = try allocator.alloc(u8, frame_len);
+    @memset(buf, 0);
+
+    buf[0] = 0xD3;
+    buf[1] = @truncate((payload_bytes >> 8) & 0x03);
+    buf[2] = @truncate(payload_bytes & 0xFF);
+
+    var bw = BitWriter.init(buf[3 .. 3 + payload_bytes]);
+    bw.writeU(12, 1005);                  // message number
+    bw.writeU(12, ref_station_id);
+    bw.writeU(6, 0);                      // ITRF realization year
+    bw.writeU(1, 1);                      // GPS supported
+    bw.writeU(1, 1);                      // GLONASS supported
+    bw.writeU(1, 1);                      // Galileo supported
+    bw.writeU(1, if (non_physical) 1 else 0);  // reference station indicator
+
+    const x_q: i64 = @intFromFloat(@round(ecef[0] / 0.0001));
+    const y_q: i64 = @intFromFloat(@round(ecef[1] / 0.0001));
+    const z_q: i64 = @intFromFloat(@round(ecef[2] / 0.0001));
+
+    bw.writeS(38, x_q);
+    bw.writeU(1, 0);                      // single receiver oscillator
+    bw.writeU(1, 0);                      // reserved
+    bw.writeS(38, y_q);
+    bw.writeU(1, 0);                      // quarter cycle indicator
+    bw.writeS(38, z_q);
+
+    // CRC-24Q
+    const rtcm3 = @import("../ntrip/rtcm3.zig");
+    const crc = rtcm3.crc24q(buf[0 .. 3 + payload_bytes]);
+    buf[3 + payload_bytes + 0] = @truncate(crc >> 16);
+    buf[3 + payload_bytes + 1] = @truncate(crc >> 8);
+    buf[3 + payload_bytes + 2] = @truncate(crc);
+
+    return buf;
 }
 
 /// ECEF → WGS84 緯度経度 [rad, rad]
