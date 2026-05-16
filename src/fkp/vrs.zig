@@ -534,8 +534,13 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
     const lon_rad = lon_deg * std.math.pi / 180.0;
     const ecef = msm7.latLonAltToEcef(lat_rad, lon_rad, alt_m);
 
-    // rover id から派生した仮想 Reference Station ID (上位 12 bit に収まるよう mask)
-    const ref_id: u16 = @truncate(0x4000 | (rover.id & 0x0FFF));
+    // RTCM 1005 Reference Station ID は 12 bit (0..4095) しか収まらないため、
+    // 仮想マーカーは高位ビット 0x800 + 下位 11 bit を rover.id にする
+    // (range: 2048..4095, 通常の実基準局 ID とは別空間)。
+    // 旧コードは 0x4000 マーカーを使っていたが encodeMsg1005 の writeU(12, ...)
+    // で truncate されて rover からは ref_id=1 にしか見えなかった (Phase 4
+    // 既知問題の根因)。
+    const ref_id: u16 = @truncate(0x800 | (rover.id & 0x7FF));
 
     const frame = msm7.encodeMsg1005(rover.alloc, ref_id, ecef, true) catch return;
     defer rover.alloc.free(frame);
@@ -547,8 +552,8 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
     // 初回のみ info ログ。以後は終了時サマリで集計確認。
     if (rover.inject_1005_count == 1) {
         rt.state.logger.info(
-            "[vrs] rover id={d} first inject 1005: ref_id=0x{X:0>4} ecef=({d:.3},{d:.3},{d:.3})",
-            .{ rover.id, ref_id, ecef[0], ecef[1], ecef[2] },
+            "[vrs] rover id={d} first inject 1005: ref_id=0x{X:0>3} ({d}) ecef=({d:.3},{d:.3},{d:.3})",
+            .{ rover.id, ref_id, ref_id, ecef[0], ecef[1], ecef[2] },
         );
     }
 }
@@ -726,6 +731,30 @@ test "vrs: handleGgaLine ignores garbage" {
     try testing.expect(!rover.has_position);
     handleGgaLine(null, &rover, "");
     try testing.expect(!rover.has_position);
+}
+
+test "vrs: encodeMsg1005 + parseMsg1005 roundtrip preserves 12-bit ref_id" {
+    // Phase 4 既知バグの regression: inject1005 が 0x4000 marker bit を立てて
+    // いたが ref_id は 12-bit field なので silent truncate されて rover からは
+    // ref_id=1 にしか見えなかった。修正後は 12-bit 内に収めるので、エンコード/
+    // パースで値が往復することを確認する。
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // VRS 仮想マーカー範囲の上下端 + 中間値で round-trip
+    const test_ids = [_]u16{ 0x800, 0x801, 0xA42, 0xFFF };
+    for (test_ids) |rid| {
+        const frame = try msm7.encodeMsg1005(a, rid, .{ 4212550.838, 167720.710, 4770076.851 }, true);
+        // payload は frame[3..3+19]、parseMsg1005 はそこを期待
+        const decoded = msm7.parseMsg1005(frame[3 .. 3 + 19]) orelse return error.ParseFailed;
+        try testing.expectEqual(rid, decoded.ref_station_id);
+    }
+}
+
+test "vrs: encodeMsg1005 rejects ref_id > 12 bits" {
+    const buf = msm7.encodeMsg1005(testing.allocator, 0x4001, .{ 0, 0, 0 }, false);
+    try testing.expectError(error.RefIdOutOfRange, buf);
 }
 
 test "vrs: parseDdmm round trip with known values" {

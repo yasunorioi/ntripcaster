@@ -310,6 +310,8 @@ pub fn latLonAltToEcef(lat: f64, lon: f64, alt: f64) [3]f64 {
 /// RTCM3 Type 1005 (Stationary Antenna Reference Point) フレームを生成する。
 /// ECEF 座標 + Reference Station ID を入力に、parseMsg1005 と対称な構造でエンコード。
 ///
+/// `ref_station_id`: 0..4095 (12 bit)。これを超えると `error.RefIdOutOfRange`。
+///   過去に 0x4000 を渡して silent truncate されるバグがあったため明示的にチェック。
 /// `non_physical`: true = "Reference Station Indicator" bit を 1 にする (VRS の自己申告)
 /// 返却値: 完全な RTCM3 フレーム (CRC 含む)。allocator で解放すること。
 pub fn encodeMsg1005(
@@ -318,6 +320,8 @@ pub fn encodeMsg1005(
     ecef: [3]f64,
     non_physical: bool,
 ) ![]u8 {
+    if (ref_station_id > 0xFFF) return error.RefIdOutOfRange;
+
     // payload: 12+12+6+1+1+1+1+38+1+1+38+1+38 = 151 bits = 19 bytes
     const payload_bytes: usize = 19;
     const frame_len: usize = 3 + payload_bytes + 3;
