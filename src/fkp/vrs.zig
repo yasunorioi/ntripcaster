@@ -74,10 +74,12 @@ pub const VrsRover = struct {
     inject_1005_count: u64 = 0,
     /// forwardFiltered が転送した RTCM3 フレーム累計
     frames_forwarded: u64 = 0,
-    /// forwardFiltered が drop した RTCM3 フレーム累計 (msg_type=59/1005)
+    /// forwardFiltered が drop した RTCM3 フレーム累計 (msg_type=59/1005/1006)
     frames_dropped: u64 = 0,
     /// drop した中で msg_type=1005 だったフレーム累計 (1005 漏れ調査用)
     frames_dropped_1005: u64 = 0,
+    /// drop した中で msg_type=1006 だったフレーム累計 (1006 = 1005 + AntHeight)
+    frames_dropped_1006: u64 = 0,
     /// drop した中で msg_type=59 だったフレーム累計
     frames_dropped_59: u64 = 0,
 
@@ -237,7 +239,7 @@ pub const Runtime = struct {
         runRoverLoop(self, rover);
         self.state.logger.info(
             "[vrs] rover disconnected: id={d} in={d}B out={d}B uptime={d}s " ++
-                "frames_fwd={d} drop_total={d} (1005={d} 59={d}) inject_1005={d} has_pos={any}",
+                "frames_fwd={d} drop_total={d} (1005={d} 1006={d} 59={d}) inject_1005={d} has_pos={any}",
             .{
                 id,
                 rover.bytes_in,
@@ -246,6 +248,7 @@ pub const Runtime = struct {
                 rover.frames_forwarded,
                 rover.frames_dropped,
                 rover.frames_dropped_1005,
+                rover.frames_dropped_1006,
                 rover.frames_dropped_59,
                 rover.inject_1005_count,
                 rover.has_position,
@@ -282,6 +285,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
     var last_stats_at_ms: i64 = std.time.milliTimestamp();
     var last_stats_frames_fwd: u64 = 0;
     var last_stats_drop_1005: u64 = 0;
+    var last_stats_drop_1006: u64 = 0;
     const start_ms = std.time.milliTimestamp();
 
     // rover stream 読み取り用の小バッファ + 1 行 (GGA) 切り出し用
@@ -344,13 +348,15 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
         if (now - last_stats_at_ms >= 5000 and now - start_ms >= 10_000) {
             const dfwd = rover.frames_forwarded - last_stats_frames_fwd;
             const d1005 = rover.frames_dropped_1005 - last_stats_drop_1005;
+            const d1006 = rover.frames_dropped_1006 - last_stats_drop_1006;
             rt.state.logger.info(
-                "[vrs] rover id={d} stats: fwd+={d} drop_1005+={d} has_pos={any} inject_1005={d}",
-                .{ rover.id, dfwd, d1005, has_pos, rover.inject_1005_count },
+                "[vrs] rover id={d} stats: fwd+={d} drop_1005+={d} drop_1006+={d} has_pos={any} inject_1005={d}",
+                .{ rover.id, dfwd, d1005, d1006, has_pos, rover.inject_1005_count },
             );
             last_stats_at_ms = now;
             last_stats_frames_fwd = rover.frames_forwarded;
             last_stats_drop_1005 = rover.frames_dropped_1005;
+            last_stats_drop_1006 = rover.frames_dropped_1006;
         }
 
         // 4) initial GGA timeout チェック
@@ -513,10 +519,16 @@ fn forwardFiltered(writer: anytype, buf: []const u8, rover: *VrsRover) !usize {
             pos += 1;
             continue;
         };
-        const drop = (fr.msg_type == 59) or (fr.msg_type == 1005);
+        // 1005/1006 は VRS 側で rover 位置の仮想基準局として注入するので
+        // upstream のものは捨てる (1006 は 1005 + Antenna Height で機能的に
+        // 等価。rover に異なる ref_id の 1005 と 1006 が両方届くと conflict)。
+        // 59 は FKP runtime が virtual source に injection している補正で
+        // VRS rover には不要 (rover は FKP_PARIS ではなく VRS_PARIS を購読)。
+        const drop = (fr.msg_type == 59) or (fr.msg_type == 1005) or (fr.msg_type == 1006);
         if (drop) {
             rover.frames_dropped += 1;
             if (fr.msg_type == 1005) rover.frames_dropped_1005 += 1;
+            if (fr.msg_type == 1006) rover.frames_dropped_1006 += 1;
             if (fr.msg_type == 59) rover.frames_dropped_59 += 1;
         } else {
             writer.writeAll(buf[pos .. pos + fr.consumed]) catch return error.WriteFailed;
@@ -622,17 +634,19 @@ fn makeTestRover(alloc: std.mem.Allocator) VrsRover {
     };
 }
 
-test "vrs: forwardFiltered drops Type 1005 and Type 59, forwards others" {
+test "vrs: forwardFiltered drops Type 1005/1006/59, forwards others" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     var input: std.ArrayListUnmanaged(u8) = .{};
-    // 1077 (forward) → 1005 (drop) → 1019 (forward) → 59 (drop) → 1087 (forward)
+    // 1077 (forward) → 1005 (drop) → 1019 (forward) → 59 (drop)
+    //   → 1006 (drop) → 1087 (forward)
     try makeDummyFrame(&input, a, 1077);
     try makeDummyFrame(&input, a, 1005);
     try makeDummyFrame(&input, a, 1019);
     try makeDummyFrame(&input, a, 59);
+    try makeDummyFrame(&input, a, 1006);
     try makeDummyFrame(&input, a, 1087);
 
     var captured: std.ArrayListUnmanaged(u8) = .{};
@@ -643,8 +657,9 @@ test "vrs: forwardFiltered drops Type 1005 and Type 59, forwards others" {
 
     try testing.expectEqual(input.items.len, consumed);
     try testing.expectEqual(@as(u64, 3), rover.frames_forwarded);
-    try testing.expectEqual(@as(u64, 2), rover.frames_dropped);
+    try testing.expectEqual(@as(u64, 3), rover.frames_dropped);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1005);
+    try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1006);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_59);
     // 出力は 1077 + 1019 + 1087 の連結 (各 8 バイト)
     try testing.expectEqual(@as(usize, 3 * 8), captured.items.len);

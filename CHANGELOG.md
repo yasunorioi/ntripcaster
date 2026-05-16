@@ -56,13 +56,22 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
 - `conf/centipede-paris.conf`: 再現テスト用設定 (rtk2go レート制限回避)。
 - Test count: 141 → 159 (18 件追加: vrs 9 件 + 既存 src 9 件)
 
+**Type 1006 を filter に追加 (修正済)**:
+- 1006 は 1005 + Antenna Height で機能的に等価。upstream のものを
+  passthrough すると rover に異なる ref_id の 1005 / 1006 が両方届いて
+  conflict するため、`forwardFiltered` の drop 条件に追加。
+- `frames_dropped_1006` カウンタ + 5 秒 stats log と切断時サマリにも反映。
+- 実機検証 (centipede.fr 上流): 修正前は Type 1006 が 1 frame leak → 修正後
+  0 frames で Type 1005 (ref_id=0x0801) のみ出ることを確認。
+
 **未解決**:
-- ⚠️ Type 1006 (Stationary Antenna + Antenna Height) が upstream から
-  passthrough されると、rover に異なる ref_id (=1) を持つ 1006 が届き
-  conflict。1005 と機能的に等価なので filter に追加すべき。
 - ⚠️ `src/fkp/upstream.zig` 長時間稼働後に `parse_len - pos` integer
   overflow で SIGSEGV。発生条件未特定だが `@min(pos, parse_len)` で防御
   パッチ済み。根本原因は次セッションで再現させて修正。
+- ⚠️ Phase 5: MSM7 ref_id が upstream の値 (=1) のまま rover に届き、
+  VRS 注入 1005 の ref_id (0x801) と一致しないため rover が
+  「異なる station からの観測」として扱う。MSM7 encoder + ref_id
+  書き換えが必要 (Phase 5 design)。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
