@@ -26,12 +26,32 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
 - `conf/rtk2go-hiroshima.conf`: vrs サンプル設定追加
 - `docs/vrs-design.md`: VRS の設計判断と Phase 分割の根拠
 
-実テスト (rtk2go.com 広島 3 局, VRS_HIROSHIMA mountpoint):
-- ✅ Type 59 = 0 frames (VRS で正しく除外)
-- ✅ 主上流の MSM7/ephemeris/1019/1020/1042 等は透過配信 (1.16 MB / 15s)
-- ⚠️ Type 1005 = 178 frames で ref_id=1 のみ (cell center 座標) — 0x4000+
-  の VRS 注入 ID が観測されない: GGA パース or フィルタのバグ可能性。
-  rtk2go 側がレート制限を発動して再検証ブロック中 → 次セッションで調査
+### Phase 4 既知問題の調査 (進行中)
+
+**Type 1005 注入バグ調査**:
+- `forwardFiltered` / `handleGgaLine` / `parseDdmm` の unit test 追加 → 全て
+  仕様通りに動作することを確認 (encodeMsg1005 で生成した実 1005 フレーム
+  も含めて drop される)。コード上の filter は正常。
+- 「178 Type 1005 frames at /VRS_HIROSHIMA」観測の出所が不明 → 計測経路
+  の取り違え (/FKP_HIROSHIMA への誤接続等) の可能性。次回テストで
+  追加 diagnostic ログから断定する。
+- 診断ログ追加: 初回 GGA パース時 / 初回 inject 1005 時 / 5 秒ごとの
+  filter stats (forwarded / dropped_1005 / inject_1005_count) / rover
+  切断時の総計サマリ。これで「GGA 受信成否」「inject 発火回数」「実際の
+  filter 通過状況」が log だけで分かるようになった。
+- `src/fkp/vrs.zig`: forwardFiltered を anytype writer 化 (テスト時に
+  std.net.Stream を使わずに済むよう CaptureWriter で hook 可能に)
+- `src/lib.zig`: src/ 配下の `test {}` ブロックを test runner に拾わせる
+  ための comptime ref を追加
+- `build.zig`: lib.zig をルートにした `src_tests` step を併走 (これまで
+  `tests/test_all.zig` のモジュール境界で src 配下の test が集約されて
+  いなかった)
+- Test count: 141 → 157 (16 件追加: vrs 7 + 既存 src 9)
+
+**未解決**:
+- ⚠️ 「0x4000+ の VRS 注入 ID が観測されない」: GGA を送らない test client
+  (curl 等) で観測されたものなら期待通り (has_position=false で inject1005
+  が走らないため)。次回テストで「first GGA parsed」log が出るか確認する。
 - ⚠️ `src/fkp/upstream.zig` 長時間稼働後に `parse_len - pos` integer
   overflow で SIGSEGV。発生条件未特定だが `@min(pos, parse_len)` で防御
   パッチ済み。根本原因は次セッションで再現させて修正

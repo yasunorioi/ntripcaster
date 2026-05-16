@@ -29,3 +29,29 @@ pub const admin = struct {
     pub const stats = @import("admin/stats.zig");
     pub const server = @import("admin/server.zig");
 };
+
+// src/ 配下の全ファイルの test ブロックをコンパイル単位に含めるため、
+// すべてのモジュールに対し comptime 参照を作る。
+// `pub const X = @import(..)` だけだと未使用扱いで lazy import になり、
+// テストルートから test ブロックが見つからない (zig 0.15.2 確認済)。
+comptime {
+    _ = config;
+    _ = auth;
+    _ = log;
+    _ = relay;
+    _ = server;
+    _ = ntrip.protocol;
+    _ = ntrip.sourcetable;
+    _ = ntrip.rtcm3;
+    _ = ntrip.source;
+    _ = ntrip.client;
+    _ = fkp.bits;
+    _ = fkp.msm7;
+    _ = fkp.engine;
+    _ = fkp.type59;
+    _ = fkp.upstream;
+    _ = fkp.runtime;
+    _ = fkp.vrs;
+    _ = admin.stats;
+    _ = admin.server;
+}

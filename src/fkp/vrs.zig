@@ -67,6 +67,20 @@ pub const VrsRover = struct {
     bytes_in: u64 = 0,      // GGA 受信バイト数
     bytes_out: u64 = 0,     // 合成 RTCM3 送信バイト数
 
+    // ── 診断カウンタ (rover 終了時にまとめてログ出力) ─────────────────────
+    /// GGA を初めてパースした際に true。一度きりの info ログ用。
+    initial_gga_logged: bool = false,
+    /// この rover に inject1005 した累計
+    inject_1005_count: u64 = 0,
+    /// forwardFiltered が転送した RTCM3 フレーム累計
+    frames_forwarded: u64 = 0,
+    /// forwardFiltered が drop した RTCM3 フレーム累計 (msg_type=59/1005)
+    frames_dropped: u64 = 0,
+    /// drop した中で msg_type=1005 だったフレーム累計 (1005 漏れ調査用)
+    frames_dropped_1005: u64 = 0,
+    /// drop した中で msg_type=59 だったフレーム累計
+    frames_dropped_59: u64 = 0,
+
     pub fn create(
         alloc: std.mem.Allocator,
         id: u64,
@@ -222,12 +236,19 @@ pub const Runtime = struct {
         self.state.logger.info("[vrs] rover connected: id={d}", .{id});
         runRoverLoop(self, rover);
         self.state.logger.info(
-            "[vrs] rover disconnected: id={d} in={d}B out={d}B uptime={d}s",
+            "[vrs] rover disconnected: id={d} in={d}B out={d}B uptime={d}s " ++
+                "frames_fwd={d} drop_total={d} (1005={d} 59={d}) inject_1005={d} has_pos={any}",
             .{
                 id,
                 rover.bytes_in,
                 rover.bytes_out,
                 @divTrunc(std.time.milliTimestamp() - rover.started_at_ms, 1000),
+                rover.frames_forwarded,
+                rover.frames_dropped,
+                rover.frames_dropped_1005,
+                rover.frames_dropped_59,
+                rover.inject_1005_count,
+                rover.has_position,
             },
         );
     }
@@ -258,6 +279,9 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
     var parse_len: usize = 0;
 
     var last_1005_at_ms: i64 = 0;
+    var last_stats_at_ms: i64 = std.time.milliTimestamp();
+    var last_stats_frames_fwd: u64 = 0;
+    var last_stats_drop_1005: u64 = 0;
     const start_ms = std.time.milliTimestamp();
 
     // rover stream 読み取り用の小バッファ + 1 行 (GGA) 切り出し用
@@ -270,7 +294,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
 
     while (fkp_src.active.load(.seq_cst)) {
         // 1) rover stream を polling して GGA を読みに行く
-        tryReadGga(rover, gga_acc[0..], &gga_len);
+        tryReadGga(rt, rover, gga_acc[0..], &gga_len);
 
         // 2) 上流 RingBuffer から新着 RTCM3 を読む
         var read_buf: [relay.RingBuffer.CHUNK_SIZE]u8 = undefined;
@@ -288,7 +312,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
             read_pos = r.next_pos;
 
             // フレームスキャン → 1005/59 をスキップ、他はそのまま forward
-            const advanced = forwardFiltered(rover, parse_buf[0..parse_len]) catch break;
+            const advanced = forwardFiltered(rover.stream, parse_buf[0..parse_len], rover) catch break;
             const remaining = parse_len - advanced;
             if (remaining > 0 and advanced > 0) {
                 std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[advanced..parse_len]);
@@ -311,9 +335,22 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
         if (has_pos) {
             const interval_ms: i64 = @intCast(@as(u64, rt.vrs_cfg.inject_1005_interval_sec) * 1000);
             if (now - last_1005_at_ms >= interval_ms) {
-                inject1005(rover, r_lat, r_lon, r_alt) catch break;
+                inject1005(rt, rover, r_lat, r_lon, r_alt) catch break;
                 last_1005_at_ms = now;
             }
+        }
+
+        // 3.5) 5 秒ごとにフィルタ統計を info ログに出す (10 秒以降のみ)
+        if (now - last_stats_at_ms >= 5000 and now - start_ms >= 10_000) {
+            const dfwd = rover.frames_forwarded - last_stats_frames_fwd;
+            const d1005 = rover.frames_dropped_1005 - last_stats_drop_1005;
+            rt.state.logger.info(
+                "[vrs] rover id={d} stats: fwd+={d} drop_1005+={d} has_pos={any} inject_1005={d}",
+                .{ rover.id, dfwd, d1005, has_pos, rover.inject_1005_count },
+            );
+            last_stats_at_ms = now;
+            last_stats_frames_fwd = rover.frames_forwarded;
+            last_stats_drop_1005 = rover.frames_dropped_1005;
         }
 
         // 4) initial GGA timeout チェック
@@ -365,7 +402,7 @@ fn setRecvTimeoutMs(stream: std.net.Stream, ms: u32) !void {
 
 /// rover stream から (短い timeout で) 1 回読み、改行で行をまとめて GGA を抽出する。
 /// SO_RCVTIMEO 設定済 → 100ms 以内にデータが無ければ read() がエラーで戻る。
-fn tryReadGga(rover: *VrsRover, acc: []u8, acc_len: *usize) void {
+fn tryReadGga(rt: *Runtime, rover: *VrsRover, acc: []u8, acc_len: *usize) void {
     var buf: [256]u8 = undefined;
     const n = rover.stream.read(&buf) catch return;
     if (n == 0) return;
@@ -383,13 +420,13 @@ fn tryReadGga(rover: *VrsRover, acc: []u8, acc_len: *usize) void {
         if (b == '\n') {
             // 行確定 → GGA か検査
             const line = acc[0..acc_len.*];
-            handleGgaLine(rover, line);
+            handleGgaLine(rt, rover, line);
             acc_len.* = 0;
         }
     }
 }
 
-fn handleGgaLine(rover: *VrsRover, line: []const u8) void {
+fn handleGgaLine(rt: ?*Runtime, rover: *VrsRover, line: []const u8) void {
     // `$G[NPLA]GGA,` で始まる行のみ採用
     if (line.len < 7) return;
     if (line[0] != '$') return;
@@ -432,7 +469,16 @@ fn handleGgaLine(rover: *VrsRover, line: []const u8) void {
     rover.lon_deg = final_lon;
     rover.alt_m = alt;
     rover.last_gga_at_ms = std.time.milliTimestamp();
+    const log_first = !rover.initial_gga_logged;
+    rover.initial_gga_logged = true;
     rover.lock.unlock();
+
+    if (log_first) if (rt) |runtime| {
+        runtime.state.logger.info(
+            "[vrs] rover id={d} first GGA parsed: lat={d:.6} lon={d:.6} alt={d:.1}m",
+            .{ rover.id, final_lat, final_lon, alt },
+        );
+    };
 }
 
 /// "ddmm.mmmm" or "dddmm.mmmm" → 度に変換。`deg_digits` は度部分の桁数 (2 or 3)。
@@ -445,10 +491,12 @@ fn parseDdmm(s: []const u8, deg_digits: usize) ?f64 {
 
 // ── フレームフィルタ + 1005 注入 ──────────────────────────────────────────
 
-/// `buf` の先頭からスキャンし、完全な RTCM3 フレームを `rover.stream` に書き出す。
+/// `buf` の先頭からスキャンし、完全な RTCM3 フレームを `writer` に書き出す。
 /// Type 1005 と Type 59 は除外 (1005 は別途 inject、59 は VRS では不要)。
 /// 不完全フレーム手前まで進めて `consumed` バイト数を返す。
-fn forwardFiltered(rover: *VrsRover, buf: []const u8) !usize {
+/// `writer` は `writeAll([]const u8) !void` を持つ任意の型 (std.net.Stream / TestWriter)。
+/// `rover` がフィルタ統計の更新先 (nullable は不可、テストでも dummy を渡す)。
+fn forwardFiltered(writer: anytype, buf: []const u8, rover: *VrsRover) !usize {
     var pos: usize = 0;
     while (pos < buf.len) {
         if (buf[pos] != rtcm3.PREAMBLE) {
@@ -466,9 +514,14 @@ fn forwardFiltered(rover: *VrsRover, buf: []const u8) !usize {
             continue;
         };
         const drop = (fr.msg_type == 59) or (fr.msg_type == 1005);
-        if (!drop) {
-            rover.stream.writeAll(buf[pos .. pos + fr.consumed]) catch return error.WriteFailed;
+        if (drop) {
+            rover.frames_dropped += 1;
+            if (fr.msg_type == 1005) rover.frames_dropped_1005 += 1;
+            if (fr.msg_type == 59) rover.frames_dropped_59 += 1;
+        } else {
+            writer.writeAll(buf[pos .. pos + fr.consumed]) catch return error.WriteFailed;
             rover.bytes_out += fr.consumed;
+            rover.frames_forwarded += 1;
         }
         pos += fr.consumed;
     }
@@ -476,7 +529,7 @@ fn forwardFiltered(rover: *VrsRover, buf: []const u8) !usize {
 }
 
 /// 仮想 Type 1005 を rover 位置で合成して送信する。
-fn inject1005(rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m: f64) !void {
+fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m: f64) !void {
     const lat_rad = lat_deg * std.math.pi / 180.0;
     const lon_rad = lon_deg * std.math.pi / 180.0;
     const ecef = msm7.latLonAltToEcef(lat_rad, lon_rad, alt_m);
@@ -489,6 +542,15 @@ fn inject1005(rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m: f64) !void {
 
     rover.stream.writeAll(frame) catch return error.WriteFailed;
     rover.bytes_out += frame.len;
+    rover.inject_1005_count += 1;
+
+    // 初回のみ info ログ。以後は終了時サマリで集計確認。
+    if (rover.inject_1005_count == 1) {
+        rt.state.logger.info(
+            "[vrs] rover id={d} first inject 1005: ref_id=0x{X:0>4} ecef=({d:.3},{d:.3},{d:.3})",
+            .{ rover.id, ref_id, ecef[0], ecef[1], ecef[2] },
+        );
+    }
 }
 
 // ── 距離 ──────────────────────────────────────────────────────────────────
@@ -515,4 +577,162 @@ fn ensureSlash(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
     out[0] = '/';
     @memcpy(out[1..], name);
     return out;
+}
+
+// ── テスト ────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+/// テスト用: writeAll の呼び出しを ArrayList に貯める偽 writer。
+const CaptureWriter = struct {
+    buf: *std.ArrayListUnmanaged(u8),
+    alloc: std.mem.Allocator,
+
+    pub fn writeAll(self: CaptureWriter, data: []const u8) !void {
+        try self.buf.appendSlice(self.alloc, data);
+    }
+};
+
+/// テスト用: 任意の msg_type を持つ 2-byte payload の RTCM3 フレームを作る。
+fn makeDummyFrame(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, msg_type: u16) !void {
+    // payload (2 bytes): msg_type(12bit MSB) + 4 bit 0
+    const payload0: u8 = @truncate((msg_type >> 4) & 0xFF);
+    const payload1: u8 = @truncate((msg_type & 0x0F) << 4);
+    var frame: [8]u8 = .{ 0xD3, 0x00, 0x02, payload0, payload1, 0, 0, 0 };
+    const crc = rtcm3.crc24q(frame[0..5]);
+    frame[5] = @truncate((crc >> 16) & 0xFF);
+    frame[6] = @truncate((crc >> 8) & 0xFF);
+    frame[7] = @truncate(crc & 0xFF);
+    try buf.appendSlice(alloc, &frame);
+}
+
+/// テスト用: VrsRover のフィールドをコピーするミニ初期化。stream は使わない。
+fn makeTestRover(alloc: std.mem.Allocator) VrsRover {
+    return .{
+        .id = 42,
+        .stream = .{ .handle = -1 },  // 触らない (forwardFiltered は writer 側を使う)
+        .peer_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .started_at_ms = 0,
+        .alloc = alloc,
+    };
+}
+
+test "vrs: forwardFiltered drops Type 1005 and Type 59, forwards others" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var input: std.ArrayListUnmanaged(u8) = .{};
+    // 1077 (forward) → 1005 (drop) → 1019 (forward) → 59 (drop) → 1087 (forward)
+    try makeDummyFrame(&input, a, 1077);
+    try makeDummyFrame(&input, a, 1005);
+    try makeDummyFrame(&input, a, 1019);
+    try makeDummyFrame(&input, a, 59);
+    try makeDummyFrame(&input, a, 1087);
+
+    var captured: std.ArrayListUnmanaged(u8) = .{};
+    const writer = CaptureWriter{ .buf = &captured, .alloc = a };
+    var rover = makeTestRover(a);
+
+    const consumed = try forwardFiltered(writer, input.items, &rover);
+
+    try testing.expectEqual(input.items.len, consumed);
+    try testing.expectEqual(@as(u64, 3), rover.frames_forwarded);
+    try testing.expectEqual(@as(u64, 2), rover.frames_dropped);
+    try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1005);
+    try testing.expectEqual(@as(u64, 1), rover.frames_dropped_59);
+    // 出力は 1077 + 1019 + 1087 の連結 (各 8 バイト)
+    try testing.expectEqual(@as(usize, 3 * 8), captured.items.len);
+    // 各フレーム先頭が PREAMBLE であること
+    try testing.expectEqual(@as(u8, 0xD3), captured.items[0]);
+    try testing.expectEqual(@as(u8, 0xD3), captured.items[8]);
+    try testing.expectEqual(@as(u8, 0xD3), captured.items[16]);
+    // msg_type 抽出して確認
+    const mt0: u16 = (@as(u16, captured.items[3]) << 4) | (captured.items[4] >> 4);
+    const mt1: u16 = (@as(u16, captured.items[11]) << 4) | (captured.items[12] >> 4);
+    const mt2: u16 = (@as(u16, captured.items[19]) << 4) | (captured.items[20] >> 4);
+    try testing.expectEqual(@as(u16, 1077), mt0);
+    try testing.expectEqual(@as(u16, 1019), mt1);
+    try testing.expectEqual(@as(u16, 1087), mt2);
+}
+
+test "vrs: forwardFiltered drops real encoded 1005 frame" {
+    // encodeMsg1005 で作った実フレームが drop されることを検証 (artificial dummy ではない)
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const real_1005 = try msm7.encodeMsg1005(a, 1, .{ -3949000.123, 3357000.456, 3700000.789 }, false);
+    var captured: std.ArrayListUnmanaged(u8) = .{};
+    const writer = CaptureWriter{ .buf = &captured, .alloc = a };
+    var rover = makeTestRover(a);
+
+    const consumed = try forwardFiltered(writer, real_1005, &rover);
+    try testing.expectEqual(real_1005.len, consumed);
+    try testing.expectEqual(@as(u64, 0), rover.frames_forwarded);
+    try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1005);
+    try testing.expectEqual(@as(usize, 0), captured.items.len);
+}
+
+test "vrs: forwardFiltered stops at incomplete trailing frame" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var input: std.ArrayListUnmanaged(u8) = .{};
+    try makeDummyFrame(&input, a, 1077);  // 完全 (forward)
+    // 中途半端な 2 番目のフレームヘッダだけ (preamble + len_hi のみ)
+    try input.appendSlice(a, &.{ 0xD3, 0x00 });
+
+    var captured: std.ArrayListUnmanaged(u8) = .{};
+    const writer = CaptureWriter{ .buf = &captured, .alloc = a };
+    var rover = makeTestRover(a);
+
+    const consumed = try forwardFiltered(writer, input.items, &rover);
+    try testing.expectEqual(@as(usize, 8), consumed);
+    try testing.expectEqual(@as(u64, 1), rover.frames_forwarded);
+}
+
+test "vrs: handleGgaLine parses standard $GPGGA" {
+    var rover = makeTestRover(testing.allocator);
+    // 4807.038 (ddmm.mmmm) → 48 + 7.038/60 = 48.1173°
+    // 01131.000 (dddmm.mmmm) → 11 + 31.000/60 = 11.5167°
+    const line = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47\r\n";
+    handleGgaLine(null, &rover, line);
+    try testing.expect(rover.has_position);
+    try testing.expectApproxEqAbs(@as(f64, 48.1173), rover.lat_deg, 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 11.5167), rover.lon_deg, 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 545.4), rover.alt_m, 0.01);
+}
+
+test "vrs: handleGgaLine handles $GNGGA (multi-GNSS prefix)" {
+    var rover = makeTestRover(testing.allocator);
+    const line = "$GNGGA,000000.00,3530.0000,N,13730.0000,E,1,08,0.9,10.5,M,46.9,M,,*XX\r\n";
+    handleGgaLine(null, &rover, line);
+    try testing.expect(rover.has_position);
+    try testing.expectApproxEqAbs(@as(f64, 35.5), rover.lat_deg, 0.001);
+    try testing.expectApproxEqAbs(@as(f64, 137.5), rover.lon_deg, 0.001);
+}
+
+test "vrs: handleGgaLine ignores non-GGA NMEA" {
+    var rover = makeTestRover(testing.allocator);
+    handleGgaLine(null, &rover, "$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A\r\n");
+    try testing.expect(!rover.has_position);
+}
+
+test "vrs: handleGgaLine ignores garbage" {
+    var rover = makeTestRover(testing.allocator);
+    handleGgaLine(null, &rover, "garbage line\r\n");
+    try testing.expect(!rover.has_position);
+    handleGgaLine(null, &rover, "");
+    try testing.expect(!rover.has_position);
+}
+
+test "vrs: parseDdmm round trip with known values" {
+    // 4807.038 → 48 + 7.038/60 = 48.1173
+    const lat = parseDdmm("4807.038", 2) orelse return error.ParseFailed;
+    try testing.expectApproxEqAbs(@as(f64, 48.1173), lat, 0.0001);
+    // 13745.6789 → 137 + 45.6789/60 = 137.7613
+    const lon = parseDdmm("13745.6789", 3) orelse return error.ParseFailed;
+    try testing.expectApproxEqAbs(@as(f64, 137.76132), lon, 0.00001);
 }

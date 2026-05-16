@@ -52,9 +52,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    b.step("test", "Run all unit tests").dependOn(
-        &b.addRunArtifact(unit_tests).step,
-    );
+    // src/ ツリー内の `test {}` ブロックを拾うため、lib.zig をテストルート
+    // にした step を併走させる (tests/test_all.zig のモジュール境界では
+    // src/ 配下の test ブロックが集約されない)。
+    const src_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const test_step = b.step("test", "Run all unit tests");
+    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
+    test_step.dependOn(&b.addRunArtifact(src_tests).step);
 
     // ── FKP Demo (実証クライアント) ────────────────────────────────────
     const fkp_demo = b.addExecutable(.{
