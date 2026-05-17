@@ -6,6 +6,7 @@ const fkp_bits = ntripcaster.fkp.bits;
 const fkp_msm7 = ntripcaster.fkp.msm7;
 const fkp_engine = ntripcaster.fkp.engine;
 const fkp_type59 = ntripcaster.fkp.type59;
+const fkp_runtime = ntripcaster.fkp.runtime;
 
 // ── BitReader / BitWriter ─────────────────────────────────────────────────────
 
@@ -536,6 +537,83 @@ test "fkp: applyPhaseCorrection rejects non-MSM7 frames" {
         error.NotMsm7,
         fkp_msm7.applyPhaseCorrection(&frame, &.{}),
     );
+}
+
+// ── Phase 5b-2: FkpSnapshotStore ───────────────────────────────────────────
+
+test "fkp: FkpSnapshotStore returns null before first update" {
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    try std.testing.expect(store.snapshot(std.testing.allocator) == null);
+}
+
+test "fkp: FkpSnapshotStore update + snapshot roundtrip" {
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const params = [_]fkp_engine.FkpParam{
+        .{ .prn = 5, .n_i = 0.01, .e_i = -0.02, .n_0 = 1.5, .e_0 = -0.8 },
+        .{ .prn = 10, .n_i = 0.005, .e_i = 0.003, .n_0 = 0.7, .e_0 = 0.4 },
+    };
+    const ref = fkp_msm7.StationCoord{
+        .ref_station_id = 1,
+        .x = -3959730.0,
+        .y = 3352966.0,
+        .z = 3697212.0,
+        .lat = 0.622,
+        .lon = 2.438,
+    };
+    store.update(&params, ref);
+
+    const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
+    defer snap.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), snap.params.len);
+    try std.testing.expectEqual(@as(u8, 5), snap.params[0].prn);
+    try std.testing.expectEqual(@as(u8, 10), snap.params[1].prn);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.01), snap.params[0].n_i, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, -0.8), snap.params[0].e_0, 1e-12);
+    try std.testing.expectEqual(@as(u16, 1), snap.ref_coord.ref_station_id);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.622), snap.ref_coord.lat, 1e-12);
+
+    // 2 回 snapshot を取っても独立した copy が返ること (testing.allocator が leak を検出)
+    const snap2 = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
+    defer snap2.deinit(std.testing.allocator);
+    try std.testing.expect(snap.params.ptr != snap2.params.ptr);
+}
+
+test "fkp: FkpSnapshotStore second update replaces first without leak" {
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const params_a = [_]fkp_engine.FkpParam{
+        .{ .prn = 5, .n_i = 0.01, .e_i = 0.02, .n_0 = 0.3, .e_0 = 0.4 },
+    };
+    const params_b = [_]fkp_engine.FkpParam{
+        .{ .prn = 7, .n_i = 0.1, .e_i = 0.2, .n_0 = 0.5, .e_0 = 0.6 },
+        .{ .prn = 8, .n_i = 0.3, .e_i = 0.4, .n_0 = 0.7, .e_0 = 0.8 },
+    };
+    const ref = fkp_msm7.StationCoord{
+        .ref_station_id = 2,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 0,
+        .lon = 0,
+    };
+
+    store.update(&params_a, ref);
+    store.update(&params_b, ref);
+
+    const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
+    defer snap.deinit(std.testing.allocator);
+
+    // 2 回目 update の値が返る (PRN 7,8)
+    try std.testing.expectEqual(@as(usize, 2), snap.params.len);
+    try std.testing.expectEqual(@as(u8, 7), snap.params[0].prn);
+    try std.testing.expectEqual(@as(u8, 8), snap.params[1].prn);
+    // testing.allocator が defer 時点で 1 回目の params_a copy の leak を検出する
 }
 
 test "fkp: applyPhaseCorrection rejects truncated frames" {

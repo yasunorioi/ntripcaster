@@ -154,9 +154,32 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
   不変、1e-9 m 精度) / parseFrame で CRC 通る (post-write 整合) /
   truncated frame は `InvalidFrame` を返す / msg_type=1005 は `NotMsm7`。
 
+**Phase 5b-2: FkpSnapshotStore (最新 FKP パラメータ保持) 実装 (実装済)**:
+- `src/fkp/runtime.zig`: 新規 struct `FkpSnapshotStore` を追加。Mutex 保護の
+  下で最新 FKP パラメータ (`[]engine.FkpParam`) と主上流座標
+  (`msm7.StationCoord`) を heap 上に保持。
+  - `update(fkp_params, ref_coord)`: allocator で copy 確保 → ロック取得 →
+    既存があれば free → 新規をセット (writer はロック保持時間最小化)。
+  - `snapshot(alloc)`: ロック下で caller 提供 allocator にコピーを返す。
+    `?FkpSnapshot` (`{params, ref_coord}` + `deinit`)。未保存時 null。
+- `Runtime` に `latest_fkp: FkpSnapshotStore` フィールドを追加。
+  `runOneFkpCycle` で `computeFkp` 成功後 (Type 59 エンコード前) に
+  `latest_fkp.update(fkp_params, stations.items[0].coord)` で更新。
+  `destroy()` で `latest_fkp.deinit()`。convenience method
+  `Runtime.snapshotFkp(alloc)` を追加。
+- 設計: writer (FKP cycle スレッド) は 30 秒に 1 回程度の頻度、reader (VRS
+  forward path) は MSM7 フレーム毎 (~1 Hz × N rovers)。allocator copy で
+  独立性確保、Mutex 保持時間はメモリ確保中のみ。
+- `tests/test_fkp.zig`: 3 件追加 — init 直後 null / update 後 snapshot で
+  params + ref_coord 復元 (2 回連続 snapshot で独立 copy 確認) /
+  2 回 update で前者 leak なし (testing.allocator が leak 検出に使用)。
+
 **未着手 (Phase 5b 本実装)**:
-- ⚠️ Phase 5b-2 (FkpParam スナップショット保持) と 5b-3 (forwardFiltered
-  組み込み + 実機検証)。これらが揃って位置精度改善の本命作業が完了する。
+- ⚠️ Phase 5b-3 (forwardFiltered 組み込み + 実機検証)。VrsRuntime に
+  FkpRuntime 参照を持たせ、MSM7 フレームに対して `snapshotFkp` から取った
+  (n_i, e_i, n_0, e_0, ref_coord) と rover の (lat, lon) から
+  PhaseDelta[] を生成 → `applyPhaseCorrection` → 送信。
+  centipede.fr 上流で位置精度実測。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 

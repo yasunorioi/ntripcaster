@@ -19,8 +19,80 @@ const source_mod = @import("../ntrip/source.zig");
 const log_mod = @import("../log.zig");
 const relay = @import("../relay/engine.zig");
 const engine = @import("engine.zig");
+const msm7 = @import("msm7.zig");
 const type59 = @import("type59.zig");
 const upstream_mod = @import("upstream.zig");
+
+// ── FkpSnapshotStore (Phase 5b-2: VRS が参照する最新 FKP パラメータ保持) ─────
+
+/// 最新の FKP パラメータ + 主上流座標のスナップショット。
+/// `params` は呼び出し側が指定した allocator で確保された owned slice。
+pub const FkpSnapshot = struct {
+    params: []const engine.FkpParam,
+    /// 主上流 (stations[0]) の基準局座標。
+    /// VRS が rover との dN/dE を計算するときに使う。
+    ref_coord: msm7.StationCoord,
+
+    pub fn deinit(self: FkpSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.params);
+    }
+};
+
+/// 最新 FKP パラメータ + 主上流座標を Mutex 保護で保持する store。
+/// `update()` が writer、`snapshot()` が reader。両者は別スレッドからの
+/// 並行アクセスを想定。`update()` の allocation は内部 allocator、
+/// `snapshot()` は caller 提供 allocator にコピーを返す。
+pub const FkpSnapshotStore = struct {
+    alloc: std.mem.Allocator,
+    lock: std.Thread.Mutex = .{},
+    params: ?[]engine.FkpParam = null,
+    ref_coord: ?msm7.StationCoord = null,
+
+    pub fn init(alloc: std.mem.Allocator) FkpSnapshotStore {
+        return .{ .alloc = alloc };
+    }
+
+    pub fn deinit(self: *FkpSnapshotStore) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (self.params) |p| self.alloc.free(p);
+        self.params = null;
+        self.ref_coord = null;
+    }
+
+    /// 新スナップショットで置き換える。allocation 失敗時は静かにスキップ
+    /// (古いスナップショットを保持)。
+    pub fn update(
+        self: *FkpSnapshotStore,
+        fkp_params: []const engine.FkpParam,
+        ref_coord: msm7.StationCoord,
+    ) void {
+        const copy = self.alloc.alloc(engine.FkpParam, fkp_params.len) catch return;
+        @memcpy(copy, fkp_params);
+
+        self.lock.lock();
+        defer self.lock.unlock();
+        if (self.params) |old| self.alloc.free(old);
+        self.params = copy;
+        self.ref_coord = ref_coord;
+    }
+
+    /// 現在のスナップショットを caller 提供 allocator にコピーして返す。
+    /// 未保存 / コピー失敗時は null。
+    /// 返り値は呼び出し側が `FkpSnapshot.deinit()` で解放すること。
+    pub fn snapshot(
+        self: *FkpSnapshotStore,
+        allocator: std.mem.Allocator,
+    ) ?FkpSnapshot {
+        self.lock.lock();
+        defer self.lock.unlock();
+        const src_params = self.params orelse return null;
+        const src_ref = self.ref_coord orelse return null;
+        const dst = allocator.alloc(engine.FkpParam, src_params.len) catch return null;
+        @memcpy(dst, src_params);
+        return .{ .params = dst, .ref_coord = src_ref };
+    }
+};
 
 pub const Runtime = struct {
     alloc: std.mem.Allocator,
@@ -42,6 +114,10 @@ pub const Runtime = struct {
 
     /// 仮想 mountpoint に書き込んだ Type59 フレーム数の累計 (ログ用)
     fkp_frames_emitted: u64,
+
+    /// VRS など他コンポーネントが参照する最新 FKP パラメータ + 主上流座標。
+    /// 各 FKP cycle で update() され、`snapshotFkp()` 経由で読み出し可能。
+    latest_fkp: FkpSnapshotStore,
 
     pub const PassthroughCtx = struct {
         runtime: *Runtime,
@@ -77,7 +153,7 @@ pub const Runtime = struct {
         const dummy_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
         const virt = try source_mod.Source.create(alloc, mount_with_slash, dummy_addr);
         errdefer virt.destroy();
-        virt.rtcm_detected = true;  // 主上流の RTCM3 を流すので最初から true
+        virt.rtcm_detected = true; // 主上流の RTCM3 を流すので最初から true
         try state.registerSource(virt);
         errdefer state.unregisterSource(mount_with_slash);
 
@@ -121,6 +197,7 @@ pub const Runtime = struct {
             .thread = null,
             .passthrough_ctx = .{ .runtime = rt },
             .fkp_frames_emitted = 0,
+            .latest_fkp = FkpSnapshotStore.init(alloc),
         };
 
         // 主上流にパススルー設定
@@ -174,7 +251,17 @@ pub const Runtime = struct {
 
         for (self.upstreams) |u| u.destroy();
         self.alloc.free(self.upstreams);
+        self.latest_fkp.deinit();
         self.alloc.destroy(self);
+    }
+
+    /// VRS など他コンポーネント向け: 最新 FKP スナップショットをコピーして返す。
+    /// 呼び出し側が `FkpSnapshot.deinit()` で解放する。
+    pub fn snapshotFkp(
+        self: *Runtime,
+        allocator: std.mem.Allocator,
+    ) ?FkpSnapshot {
+        return self.latest_fkp.snapshot(allocator);
     }
 };
 
@@ -256,6 +343,11 @@ fn runOneFkpCycle(rt: *Runtime) void {
         rt.state.logger.warn("[fkp] no parameters produced (singular matrix or no overlap)", .{});
         return;
     }
+
+    // VRS など下流コンポーネント向けに最新スナップショットを更新。
+    // 主上流 = stations[0] (= upstreams[0] が takeSnapshot に成功した場合)
+    // の coord を ref として記録する。
+    rt.latest_fkp.update(fkp_params, stations.items[0].coord);
 
     // Type59 エンコード
     const tow_ms: u32 = @truncate(@as(u64, @intCast(std.time.timestamp())) % (7 * 24 * 3600) * 1000);
