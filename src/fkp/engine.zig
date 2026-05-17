@@ -18,6 +18,36 @@ const F2: f64 = msm7.GPS_L2_FREQ;
 pub const ALPHA: f64 = F1 * F1 / (F1 * F1 - F2 * F2); // ≈ 2.5457
 pub const BETA: f64 = F2 * F2 / (F1 * F1 - F2 * F2); // ≈ 1.5457
 
+/// FKP 係数の物理妥当性閾値 [m/rad]。
+/// 50 km baseline で 1 m 補正 = 1 / (50 km / 6378 km) = 127 m/rad、
+/// その境界より少し下に置く。50 km 内で 50 cm を超える補正は物理的に
+/// 疑わしい (electromagnetic + 大気 atmospheric 影響だけでは出ない)。
+///
+/// 真因は `computeFkp` が LIF を「衛星-局の geometric range を引いた
+/// double-difference 残差」ではなく生の搬送波位相観測値で計算しており、
+/// 衛星-局距離の km スケール勾配がそのまま FKP 係数に乗ってしまう構造的
+/// 問題 (docs/phase6-design.md § 1 参照)。本 Phase 6a 修正は safety net で、
+/// 根本対応は Phase 6b (geometric range removal) で行う。
+pub const DEFAULT_FKP_MAX_MAGNITUDE: f64 = 100.0;
+
+/// `computeFkp` の追加オプション。各フィールドはデフォルト値があるため
+/// `.{}` で呼び出すと標準動作。
+pub const ComputeOptions = struct {
+    /// 各 FkpParam の n_0/e_0/n_i/e_i 絶対値の上限 [m/rad]。
+    /// これを超える PRN は出力に含めない (棄却)。
+    /// `std.math.inf(f64)` を渡すと閾値無効 (Phase 5b 以前の挙動)。
+    max_magnitude: f64 = DEFAULT_FKP_MAX_MAGNITUDE,
+
+    /// 統計出力先。null でなければ実行統計をここに書き込む。
+    stats: ?*ComputeStats = null,
+};
+
+/// `computeFkp` の実行統計。
+pub const ComputeStats = struct {
+    /// 閾値超過で棄却された PRN 数 (Phase 6a)。
+    dropped_excess: u32 = 0,
+};
+
 /// 1 衛星の FKP パラメータ
 pub const FkpParam = struct {
     prn: u8,
@@ -106,7 +136,9 @@ pub fn invert2x2(
 pub fn computeFkp(
     allocator: std.mem.Allocator,
     stations: []const StationObs,
+    options: ComputeOptions,
 ) ![]FkpParam {
+    if (options.stats) |s| s.* = .{};
     if (stations.len < 3) return &.{};
 
     const sta_a = stations[0]; // 中心局
@@ -155,6 +187,18 @@ pub fn computeFkp(
         const e_i = inv_a[1][0] * lgf_b + inv_a[1][1] * lgf_c;
         const n_0 = inv_a[0][0] * lif_b + inv_a[0][1] * lif_c;
         const e_0 = inv_a[1][0] * lif_b + inv_a[1][1] * lif_c;
+
+        // Phase 6a: 物理妥当性チェック。computeFkp の入力 (= 生の搬送波位相
+        // 観測値) には衛星-局距離の km スケール勾配が含まれるため、3 局
+        // triangle が縮退気味だと FkpParam が物理的にあり得ない大きさになる
+        // 構造的問題がある (docs/phase6-design.md § 1)。本格的な修正は
+        // Phase 6b 以降で geometric range removal を入れるが、当面の safety
+        // net として閾値超過の PRN は出力に含めない。
+        const max_abs = @max(@max(@abs(n_i), @abs(e_i)), @max(@abs(n_0), @abs(e_0)));
+        if (max_abs > options.max_magnitude) {
+            if (options.stats) |s| s.dropped_excess += 1;
+            continue;
+        }
 
         try fkp_list.append(allocator, .{
             .prn = prn,

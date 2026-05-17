@@ -40,13 +40,14 @@ fn sendNtripGet(stream: std.net.Stream, mount: []const u8, host: []const u8, por
     _ = encoder.encode(auth_b64[0..encoded_len], auth_str);
 
     var req_buf: [512]u8 = undefined;
-    const req = try std.fmt.bufPrint(&req_buf,
+    const req = try std.fmt.bufPrint(
+        &req_buf,
         "GET /{s} HTTP/1.0\r\n" ++
-        "Host: {s}:{d}\r\n" ++
-        "Ntrip-Version: Ntrip/1.0\r\n" ++
-        "User-Agent: NTRIP NtripFkpDemo/0.1\r\n" ++
-        "Authorization: Basic {s}\r\n" ++
-        "\r\n",
+            "Host: {s}:{d}\r\n" ++
+            "Ntrip-Version: Ntrip/1.0\r\n" ++
+            "User-Agent: NTRIP NtripFkpDemo/0.1\r\n" ++
+            "Authorization: Basic {s}\r\n" ++
+            "\r\n",
         .{ mount, host, port, auth_b64[0..encoded_len] },
     );
     try stream.writeAll(req);
@@ -255,7 +256,7 @@ pub fn main() !void {
     for (0..3) |i| {
         stations[i] = station_obs_list[i].?;
     }
-    const fkp_params = try engine.computeFkp(allocator, &stations);
+    const fkp_params = try engine.computeFkp(allocator, &stations, .{});
     defer allocator.free(fkp_params);
 
     log("FKP計算完了: {d}衛星\n", .{fkp_params.len});

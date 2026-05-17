@@ -115,6 +115,10 @@ pub const Runtime = struct {
     /// 仮想 mountpoint に書き込んだ Type59 フレーム数の累計 (ログ用)
     fkp_frames_emitted: u64,
 
+    /// Phase 6a: computeFkp で閾値超過により棄却された PRN の累計
+    /// (cycle log + 切断ログに表示)
+    fkp_dropped_excess_total: u64,
+
     /// VRS など他コンポーネントが参照する最新 FKP パラメータ + 主上流座標。
     /// 各 FKP cycle で update() され、`snapshotFkp()` 経由で読み出し可能。
     latest_fkp: FkpSnapshotStore,
@@ -197,6 +201,7 @@ pub const Runtime = struct {
             .thread = null,
             .passthrough_ctx = .{ .runtime = rt },
             .fkp_frames_emitted = 0,
+            .fkp_dropped_excess_total = 0,
             .latest_fkp = FkpSnapshotStore.init(alloc),
         };
 
@@ -334,13 +339,22 @@ fn runOneFkpCycle(rt: *Runtime) void {
         return;
     }
 
-    // FKP 計算
-    const fkp_params = engine.computeFkp(alloc, stations.items) catch |err| {
+    // FKP 計算 (Phase 6a: stats で閾値超過 PRN 数を取得)
+    var fkp_stats: engine.ComputeStats = .{};
+    const fkp_params = engine.computeFkp(
+        alloc,
+        stations.items,
+        .{ .stats = &fkp_stats },
+    ) catch |err| {
         rt.state.logger.warn("[fkp] computeFkp failed: {}", .{err});
         return;
     };
+    rt.fkp_dropped_excess_total += fkp_stats.dropped_excess;
     if (fkp_params.len == 0) {
-        rt.state.logger.warn("[fkp] no parameters produced (singular matrix or no overlap)", .{});
+        rt.state.logger.warn(
+            "[fkp] no parameters produced (singular matrix or all dropped: excess={d})",
+            .{fkp_stats.dropped_excess},
+        );
         return;
     }
 
@@ -377,8 +391,15 @@ fn runOneFkpCycle(rt: *Runtime) void {
 
     if (rt.fkp_frames_emitted % 30 == 0 or rt.fkp_frames_emitted == 1) {
         rt.state.logger.info(
-            "[fkp] cycle ok: {d} satellites, {d} bytes, total {d} frames",
-            .{ fkp_params.len, frame.len, rt.fkp_frames_emitted },
+            "[fkp] cycle ok: {d} satellites, {d} bytes, total {d} frames " ++
+                "(this cycle: dropped_excess={d}, all-time total: {d})",
+            .{
+                fkp_params.len,
+                frame.len,
+                rt.fkp_frames_emitted,
+                fkp_stats.dropped_excess,
+                rt.fkp_dropped_excess_total,
+            },
         );
     }
 }

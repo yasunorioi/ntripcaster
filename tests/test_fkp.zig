@@ -104,7 +104,7 @@ test "fkp: computeFkp requires at least 3 stations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const result = try fkp_engine.computeFkp(arena.allocator(), &.{});
+    const result = try fkp_engine.computeFkp(arena.allocator(), &.{}, .{});
     try std.testing.expectEqual(@as(usize, 0), result.len);
 }
 
@@ -140,7 +140,9 @@ test "fkp: computeFkp 3-station synthetic data" {
         .lon = 142.00 * deg,
     };
 
-    // 合成観測値（PRN 5 のみ）
+    // 合成観測値（PRN 5 のみ）。1.0 m / 0.8 m の delta は物理妥当範囲を
+    // 超えるので Phase 6a の閾値判定は無効化 (max_magnitude=inf) する。
+    // 「math が finite な出力を出すこと」だけ確認する古典 sanity test。
     const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6, .l2_m = 20e6 * (1227.60 / 1575.42) }};
     const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6 + 1.0, .l2_m = 20e6 * (1227.60 / 1575.42) + 0.8 }};
     const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6 - 0.5, .l2_m = 20e6 * (1227.60 / 1575.42) - 0.4 }};
@@ -151,7 +153,7 @@ test "fkp: computeFkp 3-station synthetic data" {
         .{ .coord = coord_c, .obs = &obs_c },
     };
 
-    const fkp = try fkp_engine.computeFkp(alloc, &stations);
+    const fkp = try fkp_engine.computeFkp(alloc, &stations, .{ .max_magnitude = std.math.inf(f64) });
     try std.testing.expectEqual(@as(usize, 1), fkp.len);
     try std.testing.expectEqual(@as(u8, 5), fkp[0].prn);
     // 数値は合成データなので有限値であることだけ確認
@@ -159,6 +161,98 @@ test "fkp: computeFkp 3-station synthetic data" {
     try std.testing.expect(std.math.isFinite(fkp[0].e_i));
     try std.testing.expect(std.math.isFinite(fkp[0].n_0));
     try std.testing.expect(std.math.isFinite(fkp[0].e_0));
+}
+
+// ── Phase 6a: computeFkp 閾値判定 (excess magnitude drop) ──────────────────
+
+test "fkp: computeFkp drops PRN with excess magnitude (default threshold)" {
+    // 過大な phase 差を入力 → n_0/e_0 が 100 m/rad を超え → 棄却される
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const deg = std.math.pi / 180.0;
+    const coord_a = fkp_msm7.StationCoord{ .ref_station_id = 1, .x = 0, .y = 0, .z = 0, .lat = 44.80 * deg, .lon = 142.06 * deg };
+    const coord_b = fkp_msm7.StationCoord{ .ref_station_id = 2, .x = 0, .y = 0, .z = 0, .lat = 43.80 * deg, .lon = 142.43 * deg };
+    const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
+
+    // 大きな phase 差 (m スケール) で n_0 が 1000+ m/rad に膨らむ入力
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 1.0, .l2_m = 0.8 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = -0.5, .l2_m = -0.4 }};
+
+    const stations = [_]fkp_engine.StationObs{
+        .{ .coord = coord_a, .obs = &obs_a },
+        .{ .coord = coord_b, .obs = &obs_b },
+        .{ .coord = coord_c, .obs = &obs_c },
+    };
+
+    var stats: fkp_engine.ComputeStats = .{};
+    const fkp = try fkp_engine.computeFkp(alloc, &stations, .{ .stats = &stats });
+    try std.testing.expectEqual(@as(usize, 0), fkp.len);
+    try std.testing.expectEqual(@as(u32, 1), stats.dropped_excess);
+}
+
+test "fkp: computeFkp keeps PRN with sane magnitude (default threshold)" {
+    // 物理妥当な mm-cm スケールの phase 差 → 閾値内なので返される
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const deg = std.math.pi / 180.0;
+    const coord_a = fkp_msm7.StationCoord{ .ref_station_id = 1, .x = 0, .y = 0, .z = 0, .lat = 44.80 * deg, .lon = 142.06 * deg };
+    const coord_b = fkp_msm7.StationCoord{ .ref_station_id = 2, .x = 0, .y = 0, .z = 0, .lat = 43.80 * deg, .lon = 142.43 * deg };
+    const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
+
+    // 物理妥当な ~mm スケール差 (10mm/100km × 100km 級基線)
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.005, .l2_m = 0.004 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.007, .l2_m = 0.0055 }};
+
+    const stations = [_]fkp_engine.StationObs{
+        .{ .coord = coord_a, .obs = &obs_a },
+        .{ .coord = coord_b, .obs = &obs_b },
+        .{ .coord = coord_c, .obs = &obs_c },
+    };
+
+    var stats: fkp_engine.ComputeStats = .{};
+    const fkp = try fkp_engine.computeFkp(alloc, &stations, .{ .stats = &stats });
+    try std.testing.expectEqual(@as(usize, 1), fkp.len);
+    try std.testing.expectEqual(@as(u8, 5), fkp[0].prn);
+    try std.testing.expectEqual(@as(u32, 0), stats.dropped_excess);
+    // 閾値 100 以下であることを実証
+    const max_abs = @max(@max(@abs(fkp[0].n_i), @abs(fkp[0].e_i)), @max(@abs(fkp[0].n_0), @abs(fkp[0].e_0)));
+    try std.testing.expect(max_abs <= fkp_engine.DEFAULT_FKP_MAX_MAGNITUDE);
+}
+
+test "fkp: computeFkp custom max_magnitude threshold" {
+    // 同じ入力でも閾値次第で出力/棄却が切り替わることを確認
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const deg = std.math.pi / 180.0;
+    const coord_a = fkp_msm7.StationCoord{ .ref_station_id = 1, .x = 0, .y = 0, .z = 0, .lat = 44.80 * deg, .lon = 142.06 * deg };
+    const coord_b = fkp_msm7.StationCoord{ .ref_station_id = 2, .x = 0, .y = 0, .z = 0, .lat = 43.80 * deg, .lon = 142.43 * deg };
+    const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.005, .l2_m = 0.004 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.007, .l2_m = 0.0055 }};
+    const stations = [_]fkp_engine.StationObs{
+        .{ .coord = coord_a, .obs = &obs_a },
+        .{ .coord = coord_b, .obs = &obs_b },
+        .{ .coord = coord_c, .obs = &obs_c },
+    };
+
+    // 緩い閾値 (default 100) → 通過
+    const fkp_loose = try fkp_engine.computeFkp(alloc, &stations, .{});
+    try std.testing.expectEqual(@as(usize, 1), fkp_loose.len);
+
+    // 厳しい閾値 (0.1 m/rad) → 棄却 (mm scale 入力でも n_0 は ~1-10 m/rad 級)
+    var stats: fkp_engine.ComputeStats = .{};
+    const fkp_strict = try fkp_engine.computeFkp(alloc, &stations, .{ .max_magnitude = 0.1, .stats = &stats });
+    try std.testing.expectEqual(@as(usize, 0), fkp_strict.len);
+    try std.testing.expectEqual(@as(u32, 1), stats.dropped_excess);
 }
 
 test "fkp: ALPHA + BETA coefficients sum" {
@@ -325,7 +419,10 @@ test "fkp: computeFkp Hokkaido synthetic scale check" {
         .{ .coord = coord_c, .obs = &obs_c },
     };
 
-    const fkp = try fkp_engine.computeFkp(alloc, &stations);
+    // この test の入力 (Δl1 = 5.5/7.0 m) は本来 ~5mm 想定の数千倍で実用に
+    // 合わない数値だが、Bug 2 (FKP scale check) の regression として残す。
+    // Phase 6a の閾値は無効化して桁外れ (>10^6) でないことだけ確認。
+    const fkp = try fkp_engine.computeFkp(alloc, &stations, .{ .max_magnitude = std.math.inf(f64) });
     try std.testing.expectEqual(@as(usize, 1), fkp.len);
     // 有限値であること
     try std.testing.expect(std.math.isFinite(fkp[0].n_i));

@@ -253,10 +253,35 @@ geometric range removal を入れる必要あり。
   設計を具体化。次セッションで確認する事項 (閾値妥当性、rough_range の
   連続性、lock_time の取り出し) を 3 点リストで明記。
 
-**未着手 (Phase 6 本実装)**:
-- ⚠️ Phase 6a (computeFkp 閾値判定 + 棄却) を即着手。これで配線済みの
-  Phase 5b-3 を破壊しない safety net が入る。
-- ⚠️ Phase 6b (rough_range residual + DD) を別ブランチ
+**Phase 6a: computeFkp 閾値判定で異常 FKP 棄却 (実装済)**:
+- `src/fkp/engine.zig`:
+  - `pub const DEFAULT_FKP_MAX_MAGNITUDE: f64 = 100.0;` — 50km baseline で
+    1m 補正 (= 127 m/rad) の境界より下の経験値。
+  - `ComputeOptions { max_magnitude, stats }` 構造体追加。`computeFkp` の
+    シグネチャを `(alloc, stations, options)` に変更。`.{}` で標準動作、
+    `.{ .max_magnitude = inf }` で旧動作 (=無制限) 互換。
+  - `ComputeStats { dropped_excess }` 構造体追加。閾値超過で棄却した PRN
+    数をオプショナル出力。
+  - computeFkp ループ末尾で `max_abs(n_i, e_i, n_0, e_0) > max_magnitude`
+    なら棄却 + stats.dropped_excess++、append しない。
+- `src/fkp/runtime.zig`:
+  - `Runtime` に `fkp_dropped_excess_total: u64` フィールド追加。
+  - `runOneFkpCycle` で `var fkp_stats: ComputeStats = .{};` を確保して
+    computeFkp に渡し、cycle ok log に `dropped_excess` と累計値を追加。
+  - 全 PRN 棄却で `fkp_params.len == 0` のとき warn ログに excess 数を
+    含める (singular matrix と区別できる)。
+- `tools/fkp_demo.zig`: `computeFkp(allocator, &stations, .{})` に追従。
+- `tests/test_fkp.zig`:
+  - 既存 3 件の computeFkp 呼び出しを `.{}` または
+    `.{ .max_magnitude = inf }` に更新 (古い regression test は閾値
+    無効化で意図を保つ)。
+  - 新規 3 件追加 — 過大入力で PRN 棄却 + stats.dropped_excess=1 /
+    物理妥当入力で PRN 通過 + DEFAULT 閾値 100 以下 / 同入力でも
+    `max_magnitude=0.1` の厳格閾値で棄却される。
+- 動作: docker 内 `zig build test` 全通過 (exit=0)。
+
+**未着手 (Phase 6 残り)**:
+- ⚠️ Phase 6b (rough_range residual + DD + 簡易 ambiguity) を別ブランチ
   (`phase6-fkp-residual` 等) で着手予定。`phase4-vrs` を master に
   マージしてから派生させる。
 
