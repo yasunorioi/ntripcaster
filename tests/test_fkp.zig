@@ -115,19 +115,25 @@ test "fkp: computeFkp 3-station synthetic data" {
     const deg = std.math.pi / 180.0;
     const coord_a = fkp_msm7.StationCoord{
         .ref_station_id = 1,
-        .x = 0, .y = 0, .z = 0, // ECEFは未使用
+        .x = 0,
+        .y = 0,
+        .z = 0, // ECEFは未使用
         .lat = 44.80 * deg,
         .lon = 142.06 * deg,
     };
     const coord_b = fkp_msm7.StationCoord{
         .ref_station_id = 2,
-        .x = 0, .y = 0, .z = 0,
+        .x = 0,
+        .y = 0,
+        .z = 0,
         .lat = 43.80 * deg,
         .lon = 142.43 * deg,
     };
     const coord_c = fkp_msm7.StationCoord{
         .ref_station_id = 3,
-        .x = 0, .y = 0, .z = 0,
+        .x = 0,
+        .y = 0,
+        .z = 0,
         .lat = 43.58 * deg,
         .lon = 142.00 * deg,
     };
@@ -281,16 +287,28 @@ test "fkp: computeFkp Hokkaido synthetic scale check" {
     const deg = std.math.pi / 180.0;
     // 実際の座標（修正済み ecefToLatLon で計算した値と整合）
     const coord_a = fkp_msm7.StationCoord{
-        .ref_station_id = 1, .x = 0, .y = 0, .z = 0,
-        .lat = 44.80 * deg, .lon = 142.06 * deg,
+        .ref_station_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 44.80 * deg,
+        .lon = 142.06 * deg,
     };
     const coord_b = fkp_msm7.StationCoord{
-        .ref_station_id = 2, .x = 0, .y = 0, .z = 0,
-        .lat = 43.80 * deg, .lon = 142.43 * deg,
+        .ref_station_id = 2,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 43.80 * deg,
+        .lon = 142.43 * deg,
     };
     const coord_c = fkp_msm7.StationCoord{
-        .ref_station_id = 3, .x = 0, .y = 0, .z = 0,
-        .lat = 43.58 * deg, .lon = 142.00 * deg,
+        .ref_station_id = 3,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 43.58 * deg,
+        .lon = 142.00 * deg,
     };
 
     // 典型的な電離層差: ~5mm/100km × 基線長
@@ -313,4 +331,165 @@ test "fkp: computeFkp Hokkaido synthetic scale check" {
     // Bug 2 チェック: 桁外れ(>10^6)でないこと
     try std.testing.expect(@abs(fkp[0].n_i) < 1.0e6);
     try std.testing.expect(@abs(fkp[0].n_0) < 1.0e6);
+}
+
+// ── Phase 5b-0: extractPhase の cell_mask=false bit offset 修正 ─────────────
+
+/// extractPhase が返すべき phase_m を rough_int / rough_mod / fine_phase から再計算する。
+fn expectedPhaseM(rough_int: u32, rough_mod: u32, fine_phase: i64) f64 {
+    const c: f64 = 299792458.0;
+    const rough_ms = @as(f64, @floatFromInt(rough_int)) +
+        @as(f64, @floatFromInt(rough_mod)) * (1.0 / 1024.0);
+    const fine_ms = @as(f64, @floatFromInt(fine_phase)) * (1.0 / @as(f64, 1 << 29));
+    return (rough_ms + fine_ms) * 1e-3 * c;
+}
+
+/// テスト用に MSM7 ヘッダー (sat_mask=PRN1..3, sig_mask=L1C+L2C) を payload 先頭に書く。
+fn writeMsm7TestHeader(bw: *fkp_bits.BitWriter) void {
+    bw.writeU(12, 1077); // GPS MSM7
+    bw.writeU(12, 0x123); // ref_id
+    bw.writeU(30, 432000000); // epoch
+    bw.writeU(1, 0);
+    bw.writeU(3, 0);
+    bw.writeU(7, 0);
+    bw.writeU(2, 0);
+    bw.writeU(2, 0);
+    bw.writeU(1, 0);
+    bw.writeU(3, 0);
+    // sat_mask: PRN 1, 2, 3 (bit 63, 62, 61)
+    bw.writeU(64, (@as(u64, 1) << 63) | (@as(u64, 1) << 62) | (@as(u64, 1) << 61));
+    // sig_mask: SigID 2 (L1C), 16 (L2C) → bit 30, 16
+    bw.writeU(32, (@as(u32, 1) << 30) | (@as(u32, 1) << 16));
+}
+
+test "fkp: extractPhase full cell_mask returns all 6 observations" {
+    // 全 cell valid (nsat=3, nsig=2 → ncell=6) の既存挙動 regression。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var payload = [_]u8{0} ** 96;
+    var bw = fkp_bits.BitWriter.init(&payload);
+    writeMsm7TestHeader(&bw);
+
+    // cell_mask: 全 valid
+    for (0..6) |_| bw.writeU(1, 1);
+
+    // sat data (PRN1 / PRN2 / PRN3 でユニークな rough)
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 512);
+    bw.writeS(14, 0);
+    bw.writeU(8, 71);
+    bw.writeU(4, 0);
+    bw.writeU(10, 256);
+    bw.writeS(14, 0);
+    bw.writeU(8, 72);
+    bw.writeU(4, 0);
+    bw.writeU(10, 128);
+    bw.writeS(14, 0);
+
+    // signal data: 6 cell × 80 bit、それぞれ distinct な fine_phase
+    const fps = [_]i64{ 100000, 110000, 200000, 210000, 300000, 310000 };
+    for (fps) |fp| {
+        bw.writeS(20, 0);
+        bw.writeS(24, fp);
+        bw.writeU(10, 0);
+        bw.writeU(1, 0);
+        bw.writeU(10, 0);
+        bw.writeS(15, 0);
+    }
+
+    const obs = try fkp_msm7.extractPhase(alloc, &payload);
+    try std.testing.expectEqual(@as(usize, 6), obs.len);
+
+    // (si, gi) ループ順: (0,0)(0,1)(1,0)(1,1)(2,0)(2,1)
+    const expected = [_]struct { prn: u8, band: fkp_msm7.Band, rough_int: u32, rough_mod: u32, fp: i64 }{
+        .{ .prn = 1, .band = .l1, .rough_int = 70, .rough_mod = 512, .fp = 100000 },
+        .{ .prn = 1, .band = .l2, .rough_int = 70, .rough_mod = 512, .fp = 110000 },
+        .{ .prn = 2, .band = .l1, .rough_int = 71, .rough_mod = 256, .fp = 200000 },
+        .{ .prn = 2, .band = .l2, .rough_int = 71, .rough_mod = 256, .fp = 210000 },
+        .{ .prn = 3, .band = .l1, .rough_int = 72, .rough_mod = 128, .fp = 300000 },
+        .{ .prn = 3, .band = .l2, .rough_int = 72, .rough_mod = 128, .fp = 310000 },
+    };
+    for (expected, 0..) |e, i| {
+        try std.testing.expectEqual(e.prn, obs[i].prn);
+        try std.testing.expectEqual(e.band, obs[i].band);
+        try std.testing.expectApproxEqAbs(
+            expectedPhaseM(e.rough_int, e.rough_mod, e.fp),
+            obs[i].phase_m,
+            1e-4,
+        );
+    }
+}
+
+test "fkp: extractPhase partial cell_mask preserves bit offset" {
+    // Phase 5b-0 修正の核心テスト:
+    //   RTCM 10403.3 MSM 仕様では signal data block は cell_mask=1 の cell 分のみ存在。
+    //   修正前は invalid cell の 80 bit も読み飛ばしていたため、後続 valid cell の
+    //   phase 値が前後ズレを起こす。distinct な fine_phase で bit offset 整合を検出。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var payload = [_]u8{0} ** 96;
+    var bw = fkp_bits.BitWriter.init(&payload);
+    writeMsm7TestHeader(&bw);
+
+    // cell_mask: (PRN1,L1)=1, (PRN1,L2)=0, (PRN2,L1)=1, (PRN2,L2)=1, (PRN3,L1)=0, (PRN3,L2)=1
+    //   → ncell_valid = 4
+    bw.writeU(1, 1);
+    bw.writeU(1, 0);
+    bw.writeU(1, 1);
+    bw.writeU(1, 1);
+    bw.writeU(1, 0);
+    bw.writeU(1, 1);
+
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 512);
+    bw.writeS(14, 0);
+    bw.writeU(8, 71);
+    bw.writeU(4, 0);
+    bw.writeU(10, 256);
+    bw.writeS(14, 0);
+    bw.writeU(8, 72);
+    bw.writeU(4, 0);
+    bw.writeU(10, 128);
+    bw.writeS(14, 0);
+
+    // signal data: valid cell 4 個分のみ (仕様準拠)
+    const fps = [_]i64{ 100000, 200000, 300000, 400000 };
+    for (fps) |fp| {
+        bw.writeS(20, 0);
+        bw.writeS(24, fp);
+        bw.writeU(10, 0);
+        bw.writeU(1, 0);
+        bw.writeU(10, 0);
+        bw.writeS(15, 0);
+    }
+
+    const obs = try fkp_msm7.extractPhase(alloc, &payload);
+    try std.testing.expectEqual(@as(usize, 4), obs.len);
+
+    // (si, gi) ループ順から valid cell だけ拾った場合:
+    //   (0,0) PRN1L1 → block0 (fp=100000)
+    //   (1,0) PRN2L1 → block1 (fp=200000)
+    //   (1,1) PRN2L2 → block2 (fp=300000)
+    //   (2,1) PRN3L2 → block3 (fp=400000)
+    const expected = [_]struct { prn: u8, band: fkp_msm7.Band, rough_int: u32, rough_mod: u32, fp: i64 }{
+        .{ .prn = 1, .band = .l1, .rough_int = 70, .rough_mod = 512, .fp = 100000 },
+        .{ .prn = 2, .band = .l1, .rough_int = 71, .rough_mod = 256, .fp = 200000 },
+        .{ .prn = 2, .band = .l2, .rough_int = 71, .rough_mod = 256, .fp = 300000 },
+        .{ .prn = 3, .band = .l2, .rough_int = 72, .rough_mod = 128, .fp = 400000 },
+    };
+    for (expected, 0..) |e, i| {
+        try std.testing.expectEqual(e.prn, obs[i].prn);
+        try std.testing.expectEqual(e.band, obs[i].band);
+        try std.testing.expectApproxEqAbs(
+            expectedPhaseM(e.rough_int, e.rough_mod, e.fp),
+            obs[i].phase_m,
+            1e-4,
+        );
+    }
 }

@@ -110,6 +110,22 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
 - 作業見積もり: 5b-1 (encoder+test) 2-3h、5b-2 (FKP snapshot) 30m、5b-3
   (実機検証) 1-2h → 合計 ~5h で次セッション 1 本で完結見込み。
 
+**Phase 5b-0: extractPhase の cell_mask=false bit offset bug 修正 (実装済)**:
+- 設計メモ § 6 課題#1 で疑念を残していた cell_mask=false の cell の挙動を
+  RTCM 10403.3 § 3.5.16 で確定: signal data block は cell_mask=1 の cell
+  分のみ存在 (= ncell_valid 個)。MSM のサイズ削減仕様の中核。
+- `src/fkp/msm7.zig::extractPhase` は `nsat × nsig` 個 (= ncell) の 80-bit
+  signal data block を読んでいたため、部分 cell_mask (ある衛星だけ L1 のみ等)
+  では invalid cell の 80 bit を読み飛ばして後続 valid cell の phase 値が
+  前後ズレ → FKP 計算入力も汚染。cell_mask 全 1 (rtk2go / centipede の
+  典型局) では実害なかったため Phase 4 まで気付かれず。
+- 修正は `if (!cell_valid[cell_idx]) continue;` を readS の前へ移動する
+  1 行差分 (`valid` ローカルは削除)。Phase 5b-1 の `applyPhaseCorrection`
+  が正確な bit offset 計算を要するための前提整備。
+- `tests/test_fkp.zig`: 合成 MSM7 frame で 2 件のテスト追加 — 全 valid (6
+  cell, regression) と部分 valid (4 cell, 修正の核心)。distinct な
+  fine_phase 値で bit offset 整合性を 0.1 mm 精度で検出。
+
 **未着手 (Phase 5b 本実装)**:
 - ⚠️ MSM7 encoder + FKP 補正適用 + forwardFiltered 組み込み。位置精度
   を実際に改善する本命作業。設計メモに沿って次セッションで進める。

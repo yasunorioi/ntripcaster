@@ -197,13 +197,16 @@ pub fn extractPhase(
     }
 
     // ── シグナルデータ (MSM7: 20+24+10+1+10+15 = 80 bits per cell) ──
+    // RTCM 10403.3 § 3.5.16 準拠: signal data block は cell_mask=1 の cell 分のみ存在
+    // (= ncell_valid 個)。invalid cell の 80 bit を読み飛ばすと bit offset がズレるので、
+    // valid 判定は readS の前に行う。
     var obs_list = std.ArrayList(PhaseObs){};
     defer obs_list.deinit(allocator);
 
     for (0..nsat) |si| {
         for (0..nsig) |gi| {
             const cell_idx = si * nsig + gi;
-            const valid = cell_valid[cell_idx];
+            if (!cell_valid[cell_idx]) continue;
 
             const fine_pseudo = br.readS(20);
             _ = fine_pseudo;
@@ -213,7 +216,6 @@ pub fn extractPhase(
             br.skip(10); // CNR
             br.skip(15); // fine phase range rate
 
-            if (!valid) continue;
             if (rough_int[si] == 255) continue; // RTCM3 invalid sentinel
             if (fine_phase == -(1 << 23)) continue; // invalid fine phase
 
