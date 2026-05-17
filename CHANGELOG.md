@@ -174,12 +174,35 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
   params + ref_coord 復元 (2 回連続 snapshot で独立 copy 確認) /
   2 回 update で前者 leak なし (testing.allocator が leak 検出に使用)。
 
-**未着手 (Phase 5b 本実装)**:
-- ⚠️ Phase 5b-3 (forwardFiltered 組み込み + 実機検証)。VrsRuntime に
-  FkpRuntime 参照を持たせ、MSM7 フレームに対して `snapshotFkp` から取った
-  (n_i, e_i, n_0, e_0, ref_coord) と rover の (lat, lon) から
-  PhaseDelta[] を生成 → `applyPhaseCorrection` → 送信。
-  centipede.fr 上流で位置精度実測。
+**Phase 5b-3 配線部 (VrsRuntime ↔ FkpRuntime + forwardFiltered 組み込み) 実装済**:
+- `src/fkp/vrs.zig`:
+  - `Runtime` に `fkp_rt: ?*fkp_runtime.Runtime` フィールド追加。`Runtime.create`
+    のシグネチャに `fkp_rt: ?*fkp_runtime.Runtime` 引数を追加。null のときは
+    Phase 4 相当 (補正なし、ref_id 書き換えのみで素通し)。
+  - `VrsRover` に `frames_phase_corrected` / `frames_correction_failed`
+    カウンタ追加。rover 切断時のサマリログにも反映。
+  - `computePhaseDelta(out, alloc, snap, rover_lat_rad, rover_lon_rad)`
+    (pub): FKP snapshot + rover 位置から L1 phase delta を生成。
+    `delta_m = (n_i + n_0)·dN + (e_i + e_0)·dE`。
+  - `applyVrsPhaseCorrection(frame, rover, rt)`: arena alloc で snapshot
+    取得 → rover lock 下で位置取得 → computePhaseDelta → applyPhaseCorrection。
+    snapshot 未保存 / rover 位置未取得 / 補正エラーは
+    `frames_correction_failed` を増やしてそのまま (Phase 5a 動作 fallback)。
+  - `forwardFiltered` のシグネチャに `rt: ?*Runtime` を追加。
+    `rtcmHasStationId` 分岐内で MSM7 (1077/1087/1097) のみ
+    `applyVrsPhaseCorrection` を呼び出す。
+- `src/main.zig`: `fkp_vrs.Runtime.create(allocator, &state, fkp_rt)` で
+  fkp_rt を渡すように更新 (`fkp_rt` は同スコープで既に作成済み)。
+- `tests/test_fkp.zig`: 3 件追加 — computePhaseDelta 1 PRN (期待値 0.002m
+  に 1e-12 一致) / 多 PRN (2 entry, 各々の期待値検証) / end-to-end MSM7
+  frame の補正 (PRN1 にのみ +0.0095 m delta、CRC parseFrame で通る、
+  他 cell 不変)。
+- 既存 vrs.zig 内 test 3 件のシグネチャを `forwardFiltered(..., null)` に更新。
+
+**未着手 (Phase 5b 本実装の残)**:
+- ⚠️ Phase 5b-3 実機検証。centipede.fr 上流で実際の VRS rover (RTKLIB str2str
+  等) を接続し位置精度を測定する。ローカル Zig (0.15.2 / macOS 26) が
+  build 通らないため別環境または CI 環境で。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 

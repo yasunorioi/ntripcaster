@@ -27,6 +27,7 @@ const log_mod = @import("../log.zig");
 const relay = @import("../relay/engine.zig");
 const rtcm3 = @import("../ntrip/rtcm3.zig");
 const msm7 = @import("msm7.zig");
+const fkp_runtime = @import("runtime.zig");
 
 /// build option (default false)。`-Dvrs-inject-antenna=true` で有効化。
 /// build_options モジュールはルート側 build.zig で options_mod として作成され、
@@ -38,7 +39,7 @@ const build_options = @import("build_options");
 /// VRS 用設定。`parser.Config` から `Runtime.create()` 時にコピーされる。
 pub const VrsConfig = struct {
     enabled: bool = false,
-    mountpoint: []const u8 = "",       // 公開する mountpoint 名 (例: "/VRS_AUTO")
+    mountpoint: []const u8 = "", // 公開する mountpoint 名 (例: "/VRS_AUTO")
     /// セル中心緯度 [deg]。rover がこの点から `cell_radius_km` 以上離れたら
     /// 503 で切断する。0.0 のときは距離チェックを無効化。
     cell_center_lat: f64 = 0.0,
@@ -74,8 +75,8 @@ pub const VrsRover = struct {
     alt_m: f64 = 0.0,
     last_gga_at_ms: i64 = 0,
 
-    bytes_in: u64 = 0,      // GGA 受信バイト数
-    bytes_out: u64 = 0,     // 合成 RTCM3 送信バイト数
+    bytes_in: u64 = 0, // GGA 受信バイト数
+    bytes_out: u64 = 0, // 合成 RTCM3 送信バイト数
 
     // ── 診断カウンタ (rover 終了時にまとめてログ出力) ─────────────────────
     /// GGA を初めてパースした際に true。一度きりの info ログ用。
@@ -97,6 +98,11 @@ pub const VrsRover = struct {
     frames_dropped_1006: u64 = 0,
     /// drop した中で msg_type=59 だったフレーム累計
     frames_dropped_59: u64 = 0,
+    /// Phase 5b-3: applyPhaseCorrection が成功した MSM7 フレーム累計
+    frames_phase_corrected: u64 = 0,
+    /// Phase 5b-3: applyPhaseCorrection が失敗した MSM7 フレーム累計
+    /// (snapshot 未保存 / rover 位置未取得 / applyPhaseCorrection エラー等)
+    frames_correction_failed: u64 = 0,
 
     pub fn create(
         alloc: std.mem.Allocator,
@@ -133,6 +139,11 @@ pub const Runtime = struct {
     /// null のときは Phase 4 動作不可 (FKP も無効化されている)。
     fkp_src: ?*server.Source,
 
+    /// FKP ランタイムへの back-reference。`snapshotFkp()` 経由で MSM7
+    /// フレームに対する phase 補正を取得する。null のときは Phase 4 相当
+    /// (補正なし、frame は ref_id 書き換えのみで素通し)。
+    fkp_rt: ?*fkp_runtime.Runtime,
+
     /// 接続中の rover (id → VrsRover*)
     rover_lock: std.Thread.Mutex = .{},
     rovers: std.AutoHashMap(u64, *VrsRover),
@@ -140,6 +151,7 @@ pub const Runtime = struct {
     pub fn create(
         alloc: std.mem.Allocator,
         state: *server.ServerState,
+        fkp_rt: ?*fkp_runtime.Runtime,
     ) !*Runtime {
         const cfg = state.config;
         if (!cfg.vrs_enable) return error.VrsDisabled;
@@ -175,6 +187,7 @@ pub const Runtime = struct {
                 .inject_1005_interval_sec = cfg.vrs_inject_1005_interval_sec,
             },
             .fkp_src = fkp_src,
+            .fkp_rt = fkp_rt,
             .rovers = std.AutoHashMap(u64, *VrsRover).init(alloc),
         };
 
@@ -256,7 +269,7 @@ pub const Runtime = struct {
         self.state.logger.info(
             "[vrs] rover disconnected: id={d} vrs_ref_id=0x{X:0>3} in={d}B out={d}B uptime={d}s " ++
                 "frames_fwd={d} ref_id_rewritten={d} drop_total={d} (1005={d} 1006={d} 59={d}) " ++
-                "inject_1005={d} inject_1008={d} has_pos={any}",
+                "inject_1005={d} inject_1008={d} phase_corrected={d} corr_failed={d} has_pos={any}",
             .{
                 id,
                 rover.vrs_ref_id,
@@ -271,6 +284,8 @@ pub const Runtime = struct {
                 rover.frames_dropped_59,
                 rover.inject_1005_count,
                 rover.inject_1008_count,
+                rover.frames_phase_corrected,
+                rover.frames_correction_failed,
                 rover.has_position,
             },
         );
@@ -336,7 +351,8 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
             read_pos = r.next_pos;
 
             // フレームスキャン → 1005/59 をスキップ、他はそのまま forward
-            const advanced = forwardFiltered(rover.stream, parse_buf[0..parse_len], rover) catch break;
+            // rt 渡しで MSM7 に Phase 5b-3 補正を適用する
+            const advanced = forwardFiltered(rover.stream, parse_buf[0..parse_len], rover, rt) catch break;
             const remaining = parse_len - advanced;
             if (remaining > 0 and advanced > 0) {
                 std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[advanced..parse_len]);
@@ -438,7 +454,7 @@ fn tryReadGga(rt: *Runtime, rover: *VrsRover, acc: []u8, acc_len: *usize) void {
     // acc に追記 (溢れたら捨てて先頭から)
     for (buf[0..n]) |b| {
         if (acc_len.* >= acc.len) {
-            acc_len.* = 0;  // 行が長すぎる: リセット
+            acc_len.* = 0; // 行が長すぎる: リセット
         }
         acc[acc_len.*] = b;
         acc_len.* += 1;
@@ -564,11 +580,94 @@ fn rewriteRefIdInFrame(frame: []u8, new_ref_id: u16) void {
     frame[3 + length + 2] = @truncate(crc & 0xFF);
 }
 
+/// MSM7 メッセージタイプ判定 (1077=GPS, 1087=GLO, 1097=Gal)
+fn isMsm7(msg_type: u16) bool {
+    return msg_type == 1077 or msg_type == 1087 or msg_type == 1097;
+}
+
+/// FKP スナップショット + rover 位置 (rad) から PRN ごとの位相補正値を計算する。
+/// 簡易版: 地物的成分 (n_0, e_0) と電離層成分 (n_i, e_i) を L1 換算で合算。
+/// 結果は `out` に append (caller の allocator を使う)。
+///
+/// 数式 (docs/phase5b-design.md § 3、L1 のみ):
+///   delta_m = (n_i + n_0) * dN + (e_i + e_0) * dE
+///   dN, dE は rover - master (lat/lon 差) [rad]
+pub fn computePhaseDelta(
+    out: *std.ArrayList(msm7.PhaseDelta),
+    alloc: std.mem.Allocator,
+    snap: fkp_runtime.FkpSnapshot,
+    rover_lat_rad: f64,
+    rover_lon_rad: f64,
+) !void {
+    const d_n = rover_lat_rad - snap.ref_coord.lat;
+    const d_e = rover_lon_rad - snap.ref_coord.lon;
+    for (snap.params) |p| {
+        const delta_m = (p.n_i + p.n_0) * d_n + (p.e_i + p.e_0) * d_e;
+        try out.append(alloc, .{
+            .prn = p.prn,
+            .band = .l1,
+            .delta_m = delta_m,
+        });
+    }
+}
+
+/// MSM7 フレームに FKP 補正を適用する。失敗時は rover.frames_correction_failed
+/// を増やしてそのまま (= 補正なしの frame を送るので Phase 5a 動作にフォールバック)。
+/// Phase 5b-3。
+fn applyVrsPhaseCorrection(
+    frame: []u8,
+    rover: *VrsRover,
+    rt: *Runtime,
+) void {
+    const fkp_rt = rt.fkp_rt orelse return;
+
+    var arena = std.heap.ArenaAllocator.init(rover.alloc);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const snap = fkp_rt.snapshotFkp(alloc) orelse {
+        // FKP がまだ snapshot を生成していない (起動直後等)
+        rover.frames_correction_failed += 1;
+        return;
+    };
+    defer snap.deinit(alloc);
+
+    rover.lock.lock();
+    if (!rover.has_position) {
+        rover.lock.unlock();
+        rover.frames_correction_failed += 1;
+        return;
+    }
+    const rover_lat_rad = rover.lat_deg * std.math.pi / 180.0;
+    const rover_lon_rad = rover.lon_deg * std.math.pi / 180.0;
+    rover.lock.unlock();
+
+    var deltas = std.ArrayList(msm7.PhaseDelta){};
+    defer deltas.deinit(alloc);
+    computePhaseDelta(&deltas, alloc, snap, rover_lat_rad, rover_lon_rad) catch {
+        rover.frames_correction_failed += 1;
+        return;
+    };
+
+    msm7.applyPhaseCorrection(frame, deltas.items) catch {
+        rover.frames_correction_failed += 1;
+        return;
+    };
+
+    rover.frames_phase_corrected += 1;
+}
+
 /// `buf` の先頭からスキャンし、完全な RTCM3 フレームを `writer` に書き出す。
 /// Type 1005 / 1006 / 59 は除外、MSM7 等の station_id 保持メッセージは
-/// rover.vrs_ref_id に書き換えてから送る (Phase 5a)。
+/// rover.vrs_ref_id に書き換えてから送る (Phase 5a)。MSM7 のみ Phase 5b-3 の
+/// `applyVrsPhaseCorrection` で in-place 位相補正を適用する (rt!=null のとき)。
 /// 不完全フレーム手前まで進めて `consumed` バイト数を返す。
-fn forwardFiltered(writer: anytype, buf: []const u8, rover: *VrsRover) !usize {
+fn forwardFiltered(
+    writer: anytype,
+    buf: []const u8,
+    rover: *VrsRover,
+    rt: ?*Runtime,
+) !usize {
     // RTCM3 frame max size = 3 + 1023 + 3 = 1029 byte (length は 10 bit)。
     var scratch: [3 + 1023 + 3]u8 = undefined;
 
@@ -592,9 +691,15 @@ fn forwardFiltered(writer: anytype, buf: []const u8, rover: *VrsRover) !usize {
             if (fr.msg_type == 1006) rover.frames_dropped_1006 += 1;
             if (fr.msg_type == 59) rover.frames_dropped_59 += 1;
         } else if (rtcmHasStationId(fr.msg_type)) {
-            // station_id 含む → scratch にコピーして書き換え + CRC 再計算 → 送信
+            // station_id 含む → scratch にコピーして書き換え + CRC 再計算
             @memcpy(scratch[0..fr.consumed], buf[pos .. pos + fr.consumed]);
             rewriteRefIdInFrame(scratch[0..fr.consumed], rover.vrs_ref_id);
+            // Phase 5b-3: MSM7 のみ phase 補正適用 (rt==null の Phase 4 test は skip)
+            if (rt) |runtime| {
+                if (isMsm7(fr.msg_type)) {
+                    applyVrsPhaseCorrection(scratch[0..fr.consumed], rover, runtime);
+                }
+            }
             writer.writeAll(scratch[0..fr.consumed]) catch return error.WriteFailed;
             rover.bytes_out += fr.consumed;
             rover.frames_forwarded += 1;
@@ -637,7 +742,7 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
     // 1005 の偶数回目 (= 2 回に 1 回) で送る → 半レート。
     // 標準ビルドからは comptime if で完全に消える。
     if (comptime build_options.vrs_inject_antenna) {
-        if (rover.inject_1005_count % 2 == 1) {  // 初回 + 3回目 + 5回目 ...
+        if (rover.inject_1005_count % 2 == 1) { // 初回 + 3回目 + 5回目 ...
             injectAntenna(rt, rover) catch {};
         }
     }
@@ -671,7 +776,7 @@ fn distanceKm(lat1_deg: f64, lon1_deg: f64, lat2_deg: f64, lon2_deg: f64) f64 {
     const dlon = (lon2_deg - lon1_deg) * to_rad;
     const a = @sin(dlat / 2) * @sin(dlat / 2) +
         @cos(lat1_deg * to_rad) * @cos(lat2_deg * to_rad) *
-        @sin(dlon / 2) * @sin(dlon / 2);
+            @sin(dlon / 2) * @sin(dlon / 2);
     const c = 2 * std.math.atan2(@sqrt(a), @sqrt(1 - a));
     return R * c;
 }
@@ -724,11 +829,11 @@ fn makeTestRover(alloc: std.mem.Allocator) VrsRover {
     const id: u64 = 42;
     return .{
         .id = id,
-        .stream = .{ .handle = -1 },  // 触らない (forwardFiltered は writer 側を使う)
+        .stream = .{ .handle = -1 }, // 触らない (forwardFiltered は writer 側を使う)
         .peer_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
         .started_at_ms = 0,
         .alloc = alloc,
-        .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)),  // = 0x82A
+        .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)), // = 0x82A
     };
 }
 
@@ -751,11 +856,11 @@ test "vrs: forwardFiltered drops Type 1005/1006/59, forwards + rewrites ref_id o
     const writer = CaptureWriter{ .buf = &captured, .alloc = a };
     var rover = makeTestRover(a);
 
-    const consumed = try forwardFiltered(writer, input.items, &rover);
+    const consumed = try forwardFiltered(writer, input.items, &rover, null);
 
     try testing.expectEqual(input.items.len, consumed);
     try testing.expectEqual(@as(u64, 3), rover.frames_forwarded);
-    try testing.expectEqual(@as(u64, 2), rover.frames_ref_id_rewritten);  // 1077 + 1087
+    try testing.expectEqual(@as(u64, 2), rover.frames_ref_id_rewritten); // 1077 + 1087
     try testing.expectEqual(@as(u64, 3), rover.frames_dropped);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1005);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1006);
@@ -772,8 +877,8 @@ test "vrs: forwardFiltered drops Type 1005/1006/59, forwards + rewrites ref_id o
     // ref_id 抽出 (1077 frame の payload bytes 1-2)
     const rid0: u16 = ((@as(u16, captured.items[4]) & 0x0F) << 8) | captured.items[5];
     const rid2: u16 = ((@as(u16, captured.items[22]) & 0x0F) << 8) | captured.items[23];
-    try testing.expectEqual(rover.vrs_ref_id, rid0);  // 1077: 書き換え済
-    try testing.expectEqual(rover.vrs_ref_id, rid2);  // 1087: 書き換え済
+    try testing.expectEqual(rover.vrs_ref_id, rid0); // 1077: 書き換え済
+    try testing.expectEqual(rover.vrs_ref_id, rid2); // 1087: 書き換え済
     // 1019 (ephemeris) は station_id 持たない → そのまま (rewrite count に入らない)
     // CRC が再計算されて valid であることは captured 全体を parseFrame で再パースして確認
     var pos: usize = 0;
@@ -783,7 +888,7 @@ test "vrs: forwardFiltered drops Type 1005/1006/59, forwards + rewrites ref_id o
         cnt += 1;
         pos += fr.consumed;
     }
-    try testing.expectEqual(@as(usize, 3), cnt);  // 3 frames, 全 CRC valid
+    try testing.expectEqual(@as(usize, 3), cnt); // 3 frames, 全 CRC valid
 }
 
 test "vrs: rewriteRefIdInFrame keeps msg_type, updates ref_id, refreshes CRC" {
@@ -792,7 +897,7 @@ test "vrs: rewriteRefIdInFrame keeps msg_type, updates ref_id, refreshes CRC" {
     const a = arena.allocator();
 
     var input: std.ArrayListUnmanaged(u8) = .{};
-    try makeDummyFrame(&input, a, 1077);  // makeDummyFrame は ref_id=0 で作る
+    try makeDummyFrame(&input, a, 1077); // makeDummyFrame は ref_id=0 で作る
     rewriteRefIdInFrame(input.items, 0x801);
 
     // CRC が valid であることは parseFrame の成功で確認
@@ -811,12 +916,12 @@ test "vrs: rtcmHasStationId classifies common types correctly" {
     try testing.expect(rtcmHasStationId(1230));
     try testing.expect(rtcmHasStationId(1127));
     // 持たない: ephemeris 群 + 不明
-    try testing.expect(!rtcmHasStationId(1019));  // GPS ephemeris
-    try testing.expect(!rtcmHasStationId(1020));  // GLO ephemeris
-    try testing.expect(!rtcmHasStationId(1042));  // BDS ephemeris
-    try testing.expect(!rtcmHasStationId(1045));  // Galileo F/NAV
-    try testing.expect(!rtcmHasStationId(1046));  // Galileo I/NAV
-    try testing.expect(!rtcmHasStationId(59));    // FKP (drop 対象)
+    try testing.expect(!rtcmHasStationId(1019)); // GPS ephemeris
+    try testing.expect(!rtcmHasStationId(1020)); // GLO ephemeris
+    try testing.expect(!rtcmHasStationId(1042)); // BDS ephemeris
+    try testing.expect(!rtcmHasStationId(1045)); // Galileo F/NAV
+    try testing.expect(!rtcmHasStationId(1046)); // Galileo I/NAV
+    try testing.expect(!rtcmHasStationId(59)); // FKP (drop 対象)
     try testing.expect(!rtcmHasStationId(0));
     try testing.expect(!rtcmHasStationId(9999));
 }
@@ -832,7 +937,7 @@ test "vrs: forwardFiltered drops real encoded 1005 frame" {
     const writer = CaptureWriter{ .buf = &captured, .alloc = a };
     var rover = makeTestRover(a);
 
-    const consumed = try forwardFiltered(writer, real_1005, &rover);
+    const consumed = try forwardFiltered(writer, real_1005, &rover, null);
     try testing.expectEqual(real_1005.len, consumed);
     try testing.expectEqual(@as(u64, 0), rover.frames_forwarded);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1005);
@@ -845,7 +950,7 @@ test "vrs: forwardFiltered stops at incomplete trailing frame" {
     const a = arena.allocator();
 
     var input: std.ArrayListUnmanaged(u8) = .{};
-    try makeDummyFrame(&input, a, 1077);  // 完全 9-byte frame (forward+rewrite)
+    try makeDummyFrame(&input, a, 1077); // 完全 9-byte frame (forward+rewrite)
     // 中途半端な 2 番目のフレームヘッダだけ (preamble + len_hi のみ)
     try input.appendSlice(a, &.{ 0xD3, 0x00 });
 
@@ -853,7 +958,7 @@ test "vrs: forwardFiltered stops at incomplete trailing frame" {
     const writer = CaptureWriter{ .buf = &captured, .alloc = a };
     var rover = makeTestRover(a);
 
-    const consumed = try forwardFiltered(writer, input.items, &rover);
+    const consumed = try forwardFiltered(writer, input.items, &rover, null);
     try testing.expectEqual(@as(usize, 9), consumed);
     try testing.expectEqual(@as(u64, 1), rover.frames_forwarded);
 }
@@ -935,7 +1040,7 @@ test "vrs: encodeMsg1008 rejects too-long fields" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const long = "0123456789012345678901234567890123456789";  // 40 chars
+    const long = "0123456789012345678901234567890123456789"; // 40 chars
     try testing.expectError(error.DescriptorTooLong, msm7.encodeMsg1008(a, 0x801, long, "x"));
     try testing.expectError(error.SerialTooLong, msm7.encodeMsg1008(a, 0x801, "x", long));
     try testing.expectError(error.RefIdOutOfRange, msm7.encodeMsg1008(a, 0x1234, "x", "y"));

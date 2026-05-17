@@ -7,6 +7,7 @@ const fkp_msm7 = ntripcaster.fkp.msm7;
 const fkp_engine = ntripcaster.fkp.engine;
 const fkp_type59 = ntripcaster.fkp.type59;
 const fkp_runtime = ntripcaster.fkp.runtime;
+const fkp_vrs = ntripcaster.fkp.vrs;
 
 // ── BitReader / BitWriter ─────────────────────────────────────────────────────
 
@@ -614,6 +615,136 @@ test "fkp: FkpSnapshotStore second update replaces first without leak" {
     try std.testing.expectEqual(@as(u8, 7), snap.params[0].prn);
     try std.testing.expectEqual(@as(u8, 8), snap.params[1].prn);
     // testing.allocator が defer 時点で 1 回目の params_a copy の leak を検出する
+}
+
+// ── Phase 5b-3: computePhaseDelta + 統合フロー ──────────────────────────────
+
+test "fkp: computePhaseDelta single PRN produces expected delta" {
+    // ref_coord at (0,0)、rover at (0.001, 0.0005) rad → dN=0.001, dE=0.0005
+    // n_i=0.5, e_i=0.3, n_0=1.0, e_0=0.7 m/rad
+    // delta_m = (n_i+n_0)·dN + (e_i+e_0)·dE
+    //         = 1.5 × 0.001 + 1.0 × 0.0005
+    //         = 0.0015 + 0.0005 = 0.002 m
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const params = [_]fkp_engine.FkpParam{
+        .{ .prn = 5, .n_i = 0.5, .e_i = 0.3, .n_0 = 1.0, .e_0 = 0.7 },
+    };
+    const ref = fkp_msm7.StationCoord{
+        .ref_station_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 0,
+        .lon = 0,
+    };
+    store.update(&params, ref);
+
+    const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
+    defer snap.deinit(std.testing.allocator);
+
+    var deltas = std.ArrayList(fkp_msm7.PhaseDelta){};
+    defer deltas.deinit(std.testing.allocator);
+    try fkp_vrs.computePhaseDelta(&deltas, std.testing.allocator, snap, 0.001, 0.0005);
+
+    try std.testing.expectEqual(@as(usize, 1), deltas.items.len);
+    try std.testing.expectEqual(@as(u8, 5), deltas.items[0].prn);
+    try std.testing.expectEqual(fkp_msm7.Band.l1, deltas.items[0].band);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.002), deltas.items[0].delta_m, 1e-12);
+}
+
+test "fkp: computePhaseDelta multiple PRNs returns one entry per param" {
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const params = [_]fkp_engine.FkpParam{
+        .{ .prn = 5, .n_i = 0.5, .e_i = 0.3, .n_0 = 1.0, .e_0 = 0.7 },
+        .{ .prn = 10, .n_i = 0.1, .e_i = 0.2, .n_0 = 0.4, .e_0 = 0.6 },
+    };
+    const ref = fkp_msm7.StationCoord{
+        .ref_station_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 0,
+        .lon = 0,
+    };
+    store.update(&params, ref);
+
+    const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
+    defer snap.deinit(std.testing.allocator);
+
+    var deltas = std.ArrayList(fkp_msm7.PhaseDelta){};
+    defer deltas.deinit(std.testing.allocator);
+    try fkp_vrs.computePhaseDelta(&deltas, std.testing.allocator, snap, 0.001, 0.0005);
+
+    try std.testing.expectEqual(@as(usize, 2), deltas.items.len);
+    try std.testing.expectEqual(@as(u8, 5), deltas.items[0].prn);
+    try std.testing.expectEqual(@as(u8, 10), deltas.items[1].prn);
+    // PRN 5: (0.5+1.0)·0.001 + (0.3+0.7)·0.0005 = 0.002
+    try std.testing.expectApproxEqAbs(@as(f64, 0.002), deltas.items[0].delta_m, 1e-12);
+    // PRN 10: (0.1+0.4)·0.001 + (0.2+0.6)·0.0005 = 0.0005 + 0.0004 = 0.0009
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0009), deltas.items[1].delta_m, 1e-12);
+}
+
+test "fkp: computePhaseDelta + applyPhaseCorrection end-to-end on MSM7 frame" {
+    // 合成 MSM7 frame に対し、computePhaseDelta で生成した deltas を
+    // applyPhaseCorrection で書き込み、extractPhase で確認するエンドツーエンド。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    // PRN 1 のみ補正対象 (PRN 2, 3 は params に含めない → 補正なし)
+    const params = [_]fkp_engine.FkpParam{
+        .{ .prn = 1, .n_i = 5.0, .e_i = 2.0, .n_0 = 3.0, .e_0 = 1.0 },
+    };
+    const ref = fkp_msm7.StationCoord{
+        .ref_station_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 0,
+        .lon = 0,
+    };
+    store.update(&params, ref);
+
+    const snap = store.snapshot(alloc) orelse return error.NoSnapshot;
+    defer snap.deinit(alloc);
+
+    // rover at (0.001, 0.0005) rad
+    // delta_m = (5+3)·0.001 + (2+1)·0.0005 = 0.008 + 0.0015 = 0.0095 m
+    var deltas = std.ArrayList(fkp_msm7.PhaseDelta){};
+    defer deltas.deinit(alloc);
+    try fkp_vrs.computePhaseDelta(&deltas, alloc, snap, 0.001, 0.0005);
+
+    // MSM7 frame 構築
+    var frame: [102]u8 = undefined;
+    const fps = [_]i64{ 100000, 110000, 200000, 210000, 300000, 310000 };
+    const len = buildMsm7TestFrame(&frame, fps);
+
+    const orig_obs = try fkp_msm7.extractPhase(alloc, frame[3 .. 3 + 96]);
+    try fkp_msm7.applyPhaseCorrection(frame[0..len], deltas.items);
+
+    // CRC parseFrame で通る
+    const parsed = test_rtcm3.parseFrame(frame[0..len]) orelse return error.CrcFailed;
+    try std.testing.expectEqual(@as(u16, 1077), parsed.msg_type);
+
+    // PRN 1/L1 のみ +0.0095 m / 他 5 cell は不変
+    const new_obs = try fkp_msm7.extractPhase(alloc, frame[3 .. 3 + 96]);
+    try std.testing.expectEqual(orig_obs.len, new_obs.len);
+    for (orig_obs, new_obs) |o, n| {
+        try std.testing.expectEqual(o.prn, n.prn);
+        try std.testing.expectEqual(o.band, n.band);
+        if (o.prn == 1 and o.band == .l1) {
+            try std.testing.expectApproxEqAbs(o.phase_m + 0.0095, n.phase_m, 1e-3);
+        } else {
+            try std.testing.expectApproxEqAbs(o.phase_m, n.phase_m, 1e-9);
+        }
+    }
 }
 
 test "fkp: applyPhaseCorrection rejects truncated frames" {

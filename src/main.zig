@@ -154,7 +154,7 @@ pub fn main() !void {
         if (fkp_rt == null) {
             state.logger.warn("vrs_enable=true but FKP runtime is not active; VRS disabled", .{});
         } else {
-            vrs_rt = fkp_vrs.Runtime.create(allocator, &state) catch |err| blk: {
+            vrs_rt = fkp_vrs.Runtime.create(allocator, &state, fkp_rt) catch |err| blk: {
                 state.logger.err("vrs runtime create failed: {}", .{err});
                 break :blk null;
             };
