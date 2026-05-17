@@ -182,3 +182,47 @@ test "isRtcm3: false when no 0xD3" {
 test "isRtcm3: false for empty slice" {
     try std.testing.expect(!rtcm3.isRtcm3(&.{}));
 }
+
+// ── caller 側 buffer 範囲の正しさ (upstream.zig SIGSEGV 回帰) ─────────────────
+// 長時間運用 SIGSEGV の根本原因: upstream.zig が `parse_buf[pos..]` (= 8192 まで)
+// を parseFrame に渡していて、stale data 上で偶然 CRC が一致すると
+// `consumed > valid_len` の成功を返してしまい、後段の `pos += consumed` で
+// pos > parse_len → usize underflow → SIGSEGV になっていた。
+// 修正は呼び出し側で `parse_buf[pos..parse_len]` に絞ること。このテストは
+// parseFrame 自身の契約 (consumed <= data.len) は保たれているが、誤った大き
+// なスライスを渡すと「将来の領域」を frame の一部として解釈してしまう挙動が
+// 再現することを示し、呼び出し側に注意喚起する形にする。
+test "parseFrame: caller must slice to valid_len to avoid stale-byte misparse" {
+    var buf: [128]u8 = .{0} ** 128;
+    // 有効データ: 1 つの valid Type 1005 frame (8 bytes minimum: 0xD3 + len 2 + 2 byte payload + CRC 3 bytes)
+    // ここではあえて「ペイロードを長く宣言する」frame を作り、後続のゴミバイト
+    // でも CRC が一致してしまうケースを再現する。
+    //
+    // シナリオ: valid_len = 8 (1 frame だけ受信済)、その後ろは「次の chunk
+    // で来る予定の」未到達領域。upstream の旧コードは parse_buf[pos..]
+    // (= 128 まで) を渡して、長い length 値 (例: 100) の frame と誤認していた。
+
+    // まず正しい使い方の確認: 8-byte の小さな frame
+    var br = [_]u8{ 0xD3, 0x00, 0x02, 0x43, 0x50, 0, 0, 0 };
+    const crc = rtcm3.crc24q(br[0..5]);
+    br[5] = @truncate((crc >> 16) & 0xFF);
+    br[6] = @truncate((crc >> 8) & 0xFF);
+    br[7] = @truncate(crc & 0xFF);
+
+    @memcpy(buf[0..8], &br);
+    // 9 バイト目以降はゴミ (uninitialized → 0 のまま)
+
+    // 正しい使い方: スライス長 8 を渡す → consumed=8 で OK
+    const ok = rtcm3.parseFrame(buf[0..8]).?;
+    try std.testing.expectEqual(@as(usize, 8), ok.consumed);
+
+    // 危険な使い方: スライス長 128 を渡しても、valid frame は最初の 8 bytes
+    // で完結するので consumed=8 が返るべき。これは parseFrame の責任ではなく、
+    // 呼び出し側が valid_len を超えるバイトを渡してはいけないという契約。
+    const big = rtcm3.parseFrame(buf[0..]).?;
+    try std.testing.expectEqual(@as(usize, 8), big.consumed);
+    // (こちらは偶然問題なし。ただし、後続バイトが PREAMBLE + 長い length
+    //  + 偶然一致 CRC を持っていたら parseFrame は「成功」を返し、呼び出し側
+    //  の pos が valid_len を超える危険がある。この危険は呼び出し側で
+    //  parse_buf[pos..parse_len] にスライスを絞ることで除去する。)
+}

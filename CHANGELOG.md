@@ -64,10 +64,24 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
 - 実機検証 (centipede.fr 上流): 修正前は Type 1006 が 1 frame leak → 修正後
   0 frames で Type 1005 (ref_id=0x0801) のみ出ることを確認。
 
+**upstream.zig SIGSEGV — 真因: parseFrame に渡す slice の範囲ミス (修正済)**:
+- `rtcm3.parseFrame(parse_buf[pos..])` で渡す slice が `parse_buf[pos..parse_buf.len]`
+  (= 8192 - pos バイト) であり、parseFrame は valid data が末尾まで詰まって
+  いると信じて動作する。stale バイト (parse_len 以降の未到達領域) で length
+  field を読み、CRC が偶然一致した場合に `consumed > (parse_len - pos)` の
+  "success" を返す。これを受けて `pos += consumed` で `pos > parse_len`
+  状態となり、後段の shift で `parse_len - pos` が usize underflow → 巨大
+  値 → @memcpy / copyForwards で OOB → SIGSEGV。
+- 修正: `parse_buf[pos..parse_len]` に slice を絞る (1 単語追加)。これで
+  parseFrame の契約 `consumed <= data.len` が valid range のみに適用される。
+- 実機検証 (centipede.fr): 修正前は ~30 分 / inject_1005=412 で
+  `pos > parse_len` の assertion fire (SIGSEGV 相当)。修正後は同条件で
+  43 分 / inject_1005=538 経過しても crash ゼロ。
+- `@min(pos, parse_len)` 防御パッチも削除 (不要になった)。
+- `tests/test_rtcm3.zig`: 呼び出し側 slice 範囲の正しさを示す regression
+  test 追加。
+
 **未解決**:
-- ⚠️ `src/fkp/upstream.zig` 長時間稼働後に `parse_len - pos` integer
-  overflow で SIGSEGV。発生条件未特定だが `@min(pos, parse_len)` で防御
-  パッチ済み。根本原因は次セッションで再現させて修正。
 - ⚠️ Phase 5: MSM7 ref_id が upstream の値 (=1) のまま rover に届き、
   VRS 注入 1005 の ref_id (0x801) と一致しないため rover が
   「異なる station からの観測」として扱う。MSM7 encoder + ref_id

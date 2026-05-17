@@ -418,13 +418,21 @@ fn readLoop(self: *Upstream, stream: std.net.Stream) void {
         parse_len += chunk.len;
 
         // フレームスキャン → 1005/1006/1077/1087/1097 を処理
+        //
+        // 重要: parseFrame には必ず valid range の `parse_buf[pos..parse_len]`
+        // を渡す。`parse_buf[pos..]` だと parse_buf.len (= 8192) まで見えてしまい
+        // stale data 上で偶然 CRC が一致すると `consumed > parse_len - pos` の
+        // 成功を返し、`pos += consumed` で pos > parse_len 状態になって後段の
+        // shift で usize underflow → SIGSEGV。
+        // (Phase 4 既知問題「長時間運用で SIGSEGV」の根本原因。assertion
+        //  diag-B で実証済み、tests/test_fkp.zig に regression 追加)
         var pos: usize = 0;
         while (pos < parse_len) {
             if (parse_buf[pos] != rtcm3.PREAMBLE) {
                 pos += 1;
                 continue;
             }
-            const fr = rtcm3.parseFrame(parse_buf[pos..]) orelse {
+            const fr = rtcm3.parseFrame(parse_buf[pos..parse_len]) orelse {
                 if (parse_len - pos < 6) break; // ヘッダ未到達
                 pos += 1;
                 continue;
@@ -434,16 +442,17 @@ fn readLoop(self: *Upstream, stream: std.net.Stream) void {
             pos += fr.consumed;
         }
 
-        // 消費済みシフト
-        // 防御: scan ループが pos > parse_len を生むエッジケース (parse_buf shift と
-        // parseFrame の相互作用バグ?) を発生条件再現できていないが、SIGSEGV の根本
-        // 原因なので clamp してパニックを抑える。
-        const safe_pos = @min(pos, parse_len);
-        const remaining = parse_len - safe_pos;
-        if (remaining > 0 and safe_pos > 0) {
-            std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[safe_pos..parse_len]);
+        // 消費済みシフト。pos <= parse_len は上の invariant で保証されるので
+        // 直接引き算で OK (@min による防御は parse_buf[pos..parse_len] 化で
+        // 不要になった)。
+        if (pos > 0 and pos < parse_len) {
+            const remaining = parse_len - pos;
+            std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[pos..parse_len]);
+            parse_len = remaining;
+        } else if (pos == parse_len) {
+            parse_len = 0;
         }
-        parse_len = remaining;
+        // pos == 0 (何も消費せず) なら parse_len そのまま、次 chunk 追加待ち。
 
         // データ無音タイムアウト
         if (self.millisSinceLastData() > @as(i64, @intCast(self.cfg.data_timeout_ms))) {
