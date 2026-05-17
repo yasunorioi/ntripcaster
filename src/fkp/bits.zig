@@ -93,6 +93,27 @@ pub const BitWriter = struct {
     }
 };
 
+/// 任意 bit offset 位置に `n` bit (0..64) を書き込むスタンドアロン版。
+/// 既存ビットをクリアしてから上書きするので in-place 書き換えに使える。
+/// BitWriter と違い state を持たない (= ランダムアクセス書き込み用)。
+pub fn writeBitsAt(data: []u8, bit_offset: usize, n: u7, value: u64) void {
+    if (n == 0) return;
+    var i: u7 = n;
+    var pos = bit_offset;
+    while (i > 0) {
+        i -= 1;
+        const byte_idx = pos / 8;
+        const bit_off: u3 = @truncate(7 - (pos % 8));
+        if (byte_idx < data.len) {
+            const shift: u6 = @truncate(i);
+            const bit: u8 = @truncate((value >> shift) & 1);
+            data[byte_idx] = (data[byte_idx] & ~(@as(u8, 1) << bit_off)) |
+                (bit << bit_off);
+        }
+        pos += 1;
+    }
+}
+
 // ── テスト ────────────────────────────────────────────────────────────────────
 
 test "BitReader: read 8 bits MSB first" {
@@ -147,4 +168,30 @@ test "BitReader/BitWriter roundtrip" {
     try std.testing.expectEqual(@as(u64, 1005), br.readU(12));
     try std.testing.expectEqual(@as(i64, -1234), br.readS(16));
     try std.testing.expectEqual(@as(u64, 0b1010), br.readU(4));
+}
+
+test "writeBitsAt: overwrites existing bits" {
+    var buf = [_]u8{ 0xFF, 0xFF };
+    // bit offset 4 から 8 bit に 0x00 を書く → 上位 4bit=0xF / 中央 8bit=0x00 / 下位 4bit=0xF
+    writeBitsAt(&buf, 4, 8, 0x00);
+    try std.testing.expectEqual(@as(u8, 0xF0), buf[0]);
+    try std.testing.expectEqual(@as(u8, 0x0F), buf[1]);
+}
+
+test "writeBitsAt: roundtrip with BitReader at arbitrary offset" {
+    var buf = [_]u8{0} ** 8;
+    writeBitsAt(&buf, 13, 20, 0xABCDE);
+    var br = BitReader.init(&buf);
+    br.skip(13);
+    try std.testing.expectEqual(@as(u64, 0xABCDE), br.readU(20));
+}
+
+test "writeBitsAt: 24-bit signed two's complement" {
+    // -100000 を 24 bit に書いて読み戻すと同じ値になる
+    var buf = [_]u8{0xFF} ** 4; // 既存値を立てておく (overwrite 検証)
+    const val: i64 = -100000;
+    const masked: u64 = @as(u64, @bitCast(val)) & ((@as(u64, 1) << 24) - 1);
+    writeBitsAt(&buf, 0, 24, masked);
+    var br = BitReader.init(&buf);
+    try std.testing.expectEqual(@as(i64, -100000), br.readS(24));
 }

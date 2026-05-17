@@ -423,6 +423,133 @@ test "fkp: extractPhase full cell_mask returns all 6 observations" {
     }
 }
 
+// ── Phase 5b-1: applyPhaseCorrection (MSM7 in-place 補正) ─────────────────
+
+const test_rtcm3 = ntripcaster.ntrip.rtcm3;
+
+/// Phase 5b-1 テスト用 MSM7 frame ビルダー。
+/// nsat=3 (PRN1..3), nsig=2 (L1C/L2C)、全 cell valid (6 obs)、payload 96 byte。
+/// fps は 6 cell ぶんの fine_phase 値 (i64)。CRC を埋め込んだ完成 frame を返す。
+fn buildMsm7TestFrame(buf: *[102]u8, fps: [6]i64) usize {
+    const payload_bytes: usize = 96;
+    const frame_len: usize = 3 + payload_bytes + 3;
+    @memset(buf[0..frame_len], 0);
+
+    buf[0] = 0xD3;
+    buf[1] = @truncate((payload_bytes >> 8) & 0x03);
+    buf[2] = @truncate(payload_bytes & 0xFF);
+
+    var bw = fkp_bits.BitWriter.init(buf[3 .. 3 + payload_bytes]);
+    writeMsm7TestHeader(&bw);
+    for (0..6) |_| bw.writeU(1, 1);
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 512);
+    bw.writeS(14, 0);
+    bw.writeU(8, 71);
+    bw.writeU(4, 0);
+    bw.writeU(10, 256);
+    bw.writeS(14, 0);
+    bw.writeU(8, 72);
+    bw.writeU(4, 0);
+    bw.writeU(10, 128);
+    bw.writeS(14, 0);
+    for (fps) |fp| {
+        bw.writeS(20, 0);
+        bw.writeS(24, fp);
+        bw.writeU(10, 0);
+        bw.writeU(1, 0);
+        bw.writeU(10, 0);
+        bw.writeS(15, 0);
+    }
+
+    const crc = test_rtcm3.crc24q(buf[0 .. 3 + payload_bytes]);
+    buf[3 + payload_bytes + 0] = @truncate(crc >> 16);
+    buf[3 + payload_bytes + 1] = @truncate(crc >> 8);
+    buf[3 + payload_bytes + 2] = @truncate(crc);
+    return frame_len;
+}
+
+test "fkp: applyPhaseCorrection empty deltas leaves frame byte-identical" {
+    // 補正対象なし → payload bit は変わらないので CRC も同じ → frame バイト列が一致。
+    var frame_a: [102]u8 = undefined;
+    var frame_b: [102]u8 = undefined;
+    const fps = [_]i64{ 100000, 110000, 200000, 210000, 300000, 310000 };
+    const len_a = buildMsm7TestFrame(&frame_a, fps);
+    const len_b = buildMsm7TestFrame(&frame_b, fps);
+    try std.testing.expectEqualSlices(u8, frame_a[0..len_a], frame_b[0..len_b]);
+
+    try fkp_msm7.applyPhaseCorrection(frame_b[0..len_b], &.{});
+    try std.testing.expectEqualSlices(u8, frame_a[0..len_a], frame_b[0..len_b]);
+}
+
+test "fkp: applyPhaseCorrection +0.01m on PRN1/L1 increments only that cell" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var frame: [102]u8 = undefined;
+    const fps = [_]i64{ 100000, 110000, 200000, 210000, 300000, 310000 };
+    const len = buildMsm7TestFrame(&frame, fps);
+
+    // 元の obs を保存
+    const orig_obs = try fkp_msm7.extractPhase(alloc, frame[3 .. 3 + 96]);
+
+    const deltas = [_]fkp_msm7.PhaseDelta{
+        .{ .prn = 1, .band = .l1, .delta_m = 0.01 },
+    };
+    try fkp_msm7.applyPhaseCorrection(frame[0..len], &deltas);
+
+    // CRC が parseFrame で通る (=in-place 書き換え後の整合性確認)
+    const parsed = test_rtcm3.parseFrame(frame[0..len]) orelse return error.CrcFailed;
+    try std.testing.expectEqual(@as(u16, 1077), parsed.msg_type);
+    try std.testing.expectEqual(len, parsed.consumed);
+
+    // 補正後 obs を再抽出 → PRN1/L1 のみ +0.01m
+    const new_obs = try fkp_msm7.extractPhase(alloc, frame[3 .. 3 + 96]);
+    try std.testing.expectEqual(orig_obs.len, new_obs.len);
+    for (orig_obs, new_obs) |o, n| {
+        try std.testing.expectEqual(o.prn, n.prn);
+        try std.testing.expectEqual(o.band, n.band);
+        if (o.prn == 1 and o.band == .l1) {
+            // fine_phase 量子化 ~0.558 mm。1mm 許容で十分余裕。
+            try std.testing.expectApproxEqAbs(o.phase_m + 0.01, n.phase_m, 1e-3);
+        } else {
+            // 他の cell は完全に不変
+            try std.testing.expectApproxEqAbs(o.phase_m, n.phase_m, 1e-9);
+        }
+    }
+}
+
+test "fkp: applyPhaseCorrection rejects non-MSM7 frames" {
+    // msg_type = 1005 (= 0x3ED, payload 先頭 12 bit = 0011 1110 1101)
+    // payload_len = 19 (applyPhaseCorrection の minimum check 通過用)
+    var frame = [_]u8{0} ** 25;
+    frame[0] = 0xD3;
+    frame[1] = 0;
+    frame[2] = 19;
+    frame[3] = 0x3E;
+    frame[4] = 0xD0;
+    // CRC は入力検証されないので未設定でも OK
+
+    try std.testing.expectError(
+        error.NotMsm7,
+        fkp_msm7.applyPhaseCorrection(&frame, &.{}),
+    );
+}
+
+test "fkp: applyPhaseCorrection rejects truncated frames" {
+    var frame = [_]u8{0} ** 5; // preamble + len のみ
+    frame[0] = 0xD3;
+    frame[1] = 0;
+    frame[2] = 19;
+
+    try std.testing.expectError(
+        error.InvalidFrame,
+        fkp_msm7.applyPhaseCorrection(&frame, &.{}),
+    );
+}
+
 test "fkp: extractPhase partial cell_mask preserves bit offset" {
     // Phase 5b-0 修正の核心テスト:
     //   RTCM 10403.3 MSM 仕様では signal data block は cell_mask=1 の cell 分のみ存在。

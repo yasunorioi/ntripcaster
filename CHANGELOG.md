@@ -126,9 +126,37 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
   cell, regression) と部分 valid (4 cell, 修正の核心)。distinct な
   fine_phase 値で bit offset 整合性を 0.1 mm 精度で検出。
 
+**Phase 5b-1: applyPhaseCorrection (MSM7 in-place 補正) 実装 (実装済)**:
+- `src/fkp/bits.zig`: `writeBitsAt(data, bit_offset, n, value)` ヘルパー追加。
+  BitWriter とは別に、任意の bit offset 位置へ「クリア + 上書き」する
+  ランダムアクセス書き込み (~20 行)。既存ビット保持と signed two's
+  complement 書き込みの roundtrip テスト 3 件追加。
+- `src/fkp/msm7.zig`: `applyPhaseCorrection(frame, deltas)` 追加。
+  - 入力: 完全な RTCM3 frame (preamble..CRC) と `[]const PhaseDelta`
+    (`{prn, band, delta_m}` の配列)。
+  - 動作: MSM7 header / cell_mask / sat data を sequential 読み出し
+    → 各 valid cell の signal data 開始 bit offset を `br.bitPos()` で
+    記録 → fine_phase を読み、(PRN, band) が deltas にあれば
+    `new_fine_phase = current + delta_m / (c*1e-3) * 2^29` を
+    [-2^23+1, 2^23-1] にクランプして `writeBitsAt` で 24 bit 上書き
+    → 全 cell 処理後 CRC-24Q を再計算して末尾 3 byte に書き戻し。
+  - エラー: `InvalidFrame` (preamble/length/payload 不正) と `NotMsm7`
+    (msg_type が 1077/1087/1097 以外)。
+  - 設計判断: 完全 parse → 補正 → 再 encode の struct 経由案 (~200 行
+    追加) ではなく、設計メモ § 2.2 推奨の **in-place 書き換え**。
+    メモリコピー 1 回 + CRC 再計算で済む。
+  - GPS L1/L2/L5 のみ対応 (`gpsBandFromSigId` が GPS table のため)。
+    GLONASS/Galileo は band=unknown で no-op 透過 (Phase 5b 初版前提)。
+  - rough_int==255 / fine_phase==-2^23 (invalid sentinel) の cell は
+    補正対象から除外 (保守的)。
+- `tests/test_fkp.zig`: 5 件追加 — empty deltas で frame byte-identical /
+  PRN1/L1 に +0.01m delta で該当 cell のみ phase が増加 (他 5 cell は
+  不変、1e-9 m 精度) / parseFrame で CRC 通る (post-write 整合) /
+  truncated frame は `InvalidFrame` を返す / msg_type=1005 は `NotMsm7`。
+
 **未着手 (Phase 5b 本実装)**:
-- ⚠️ MSM7 encoder + FKP 補正適用 + forwardFiltered 組み込み。位置精度
-  を実際に改善する本命作業。設計メモに沿って次セッションで進める。
+- ⚠️ Phase 5b-2 (FkpParam スナップショット保持) と 5b-3 (forwardFiltered
+  組み込み + 実機検証)。これらが揃って位置精度改善の本命作業が完了する。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 

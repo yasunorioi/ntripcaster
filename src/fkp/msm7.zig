@@ -245,6 +245,166 @@ pub fn extractPhase(
     return try obs_list.toOwnedSlice(allocator);
 }
 
+// ── 位相補正適用 (Phase 5b-1) ─────────────────────────────────────────────────
+
+/// 1 (PRN, Band) 組に対する位相補正値 [m]。
+pub const PhaseDelta = struct {
+    prn: u8,
+    band: Band,
+    /// 加算する位相値 [m]
+    delta_m: f64,
+};
+
+/// MSM7 フレームの phase 観測値を `deltas` で in-place 書き換え、CRC-24Q を
+/// 再計算する。`frame` は preamble..CRC を含む完全な RTCM3 フレーム全体。
+///
+/// `deltas` 配列にエントリのない (PRN, Band) は変更しない。
+/// 該当 cell の `cell_mask==false` / `fine_phase==invalid sentinel` /
+/// `rough_int==255` も変更しない (保守的にスキップ)。
+///
+/// Errors:
+///   - `error.InvalidFrame`: フレーム長 / preamble / payload 長が不正
+///   - `error.NotMsm7`: メッセージタイプが MSM7 (1077/1087/1097) でない
+pub fn applyPhaseCorrection(
+    frame: []u8,
+    deltas: []const PhaseDelta,
+) !void {
+    // ── フレーム形式チェック ────────────────────────────────────────
+    if (frame.len < 6) return error.InvalidFrame;
+    if (frame[0] != 0xD3) return error.InvalidFrame;
+    const payload_len: usize =
+        (@as(usize, frame[1] & 0x03) << 8) | frame[2];
+    if (frame.len < 3 + payload_len + 3) return error.InvalidFrame;
+    if (payload_len < 19) return error.InvalidFrame;
+
+    const payload = frame[3 .. 3 + payload_len];
+
+    // msg_type は payload 先頭 12 bit
+    const msg_type: u16 = (@as(u16, payload[0]) << 4) | (payload[1] >> 4);
+    if (msg_type != 1077 and msg_type != 1087 and msg_type != 1097) {
+        return error.NotMsm7;
+    }
+
+    // ── ヘッダー解析 (extractPhase と同じロジック) ─────────────────
+    var br = BitReader.init(payload);
+    _ = br.readU(12); // message number
+    _ = br.readU(12); // ref station id
+    _ = br.readU(30); // epoch time
+    br.skip(1 + 3 + 7 + 2 + 2 + 1 + 3); // misc
+    const sat_mask: u64 = br.readU(64);
+    const sig_mask: u32 = @truncate(br.readU(32));
+    const nsat = popcount64(sat_mask);
+    const nsig = popcount32(sig_mask);
+    if (nsat == 0 or nsig == 0) return; // 何もすることなし → CRC 再計算もスキップ
+    const ncell = nsat * nsig;
+    if (ncell > 128) return error.InvalidFrame;
+
+    var prns: [64]u8 = undefined;
+    var prn_count: usize = 0;
+    {
+        var bit: u6 = 63;
+        while (true) {
+            if (sat_mask & (@as(u64, 1) << bit) != 0) {
+                prns[prn_count] = 64 - @as(u8, bit);
+                prn_count += 1;
+            }
+            if (bit == 0) break;
+            bit -= 1;
+        }
+    }
+    var sig_ids: [32]u32 = undefined;
+    var sig_count: usize = 0;
+    {
+        var bit: u5 = 31;
+        while (true) {
+            if (sig_mask & (@as(u32, 1) << bit) != 0) {
+                sig_ids[sig_count] = 32 - @as(u32, bit);
+                sig_count += 1;
+            }
+            if (bit == 0) break;
+            bit -= 1;
+        }
+    }
+
+    // ── cell_mask ──────────────────────────────────────────────────
+    var cell_valid: [128]bool = [1]bool{false} ** 128;
+    for (0..ncell) |i| {
+        cell_valid[i] = br.readU(1) == 1;
+    }
+
+    // ── サテライトデータ (rough_int, rough_mod を保存) ──────────────
+    var rough_int: [64]u32 = undefined;
+    var rough_mod: [64]u32 = undefined;
+    for (0..nsat) |i| {
+        rough_int[i] = @truncate(br.readU(8));
+        br.skip(4); // extended satellite info
+        rough_mod[i] = @truncate(br.readU(10));
+        br.skip(14); // rough phase range rate
+    }
+
+    // ── シグナルデータ (cell_valid のみ 80 bit ずつ進める) ─────────
+    // 1 cell の signal data 開始 bit offset を記録 → fine_phase は +20 bit 位置
+    for (0..nsat) |si| {
+        for (0..nsig) |gi| {
+            const cell_idx = si * nsig + gi;
+            if (!cell_valid[cell_idx]) continue;
+
+            const block_start = br.bitPos();
+            br.skip(20); // fine_pseudo
+            const fine_phase = br.readS(24);
+            br.skip(10 + 1 + 10 + 15);
+
+            // 補正対象として無効な cell をスキップ
+            if (rough_int[si] == 255) continue;
+            if (fine_phase == -(@as(i64, 1) << 23)) continue;
+
+            if (gi >= sig_count) continue;
+            const prn = prns[si];
+            const sig_id = sig_ids[gi];
+            const band = gpsBandFromSigId(sig_id);
+            if (band == .unknown) continue;
+            const delta_m = findDelta(deltas, prn, band) orelse continue;
+
+            // 現 phase_ms から新 fine_phase bits を計算
+            const rough_ms: f64 =
+                @as(f64, @floatFromInt(rough_int[si])) +
+                @as(f64, @floatFromInt(rough_mod[si])) * (1.0 / 1024.0);
+            const fine_ms_cur: f64 = @as(f64, @floatFromInt(fine_phase)) *
+                (1.0 / @as(f64, 1 << 29));
+            const phase_ms_new: f64 = rough_ms + fine_ms_cur +
+                delta_m / (LIGHT_SPEED * 1e-3);
+
+            const fine_ms_new: f64 = phase_ms_new - rough_ms;
+            var new_fine_bits: i64 = @intFromFloat(@round(fine_ms_new * @as(f64, 1 << 29)));
+
+            // [-2^23+1, 2^23-1] にクランプ (-2^23 = invalid sentinel を避ける)
+            const MAX_FINE: i64 = (@as(i64, 1) << 23) - 1;
+            const MIN_FINE: i64 = -MAX_FINE;
+            if (new_fine_bits > MAX_FINE) new_fine_bits = MAX_FINE;
+            if (new_fine_bits < MIN_FINE) new_fine_bits = MIN_FINE;
+
+            // signed 24-bit を 2's complement パターンへ
+            const new_fine_u: u64 = @as(u64, @bitCast(new_fine_bits)) &
+                ((@as(u64, 1) << 24) - 1);
+            bits.writeBitsAt(payload, block_start + 20, 24, new_fine_u);
+        }
+    }
+
+    // ── CRC-24Q 再計算 ─────────────────────────────────────────────
+    const rtcm3 = @import("../ntrip/rtcm3.zig");
+    const new_crc = rtcm3.crc24q(frame[0 .. 3 + payload_len]);
+    frame[3 + payload_len + 0] = @truncate(new_crc >> 16);
+    frame[3 + payload_len + 1] = @truncate(new_crc >> 8);
+    frame[3 + payload_len + 2] = @truncate(new_crc);
+}
+
+fn findDelta(deltas: []const PhaseDelta, prn: u8, band: Band) ?f64 {
+    for (deltas) |d| {
+        if (d.prn == prn and d.band == band) return d.delta_m;
+    }
+    return null;
+}
+
 // ── 1005/1006 基準局座標 ──────────────────────────────────────────────────────
 
 /// RTCM MSG 1005 / 1006 から抽出した基準局座標
@@ -335,23 +495,23 @@ pub fn encodeMsg1005(
     buf[2] = @truncate(payload_bytes & 0xFF);
 
     var bw = BitWriter.init(buf[3 .. 3 + payload_bytes]);
-    bw.writeU(12, 1005);                  // message number
+    bw.writeU(12, 1005); // message number
     bw.writeU(12, ref_station_id);
-    bw.writeU(6, 0);                      // ITRF realization year
-    bw.writeU(1, 1);                      // GPS supported
-    bw.writeU(1, 1);                      // GLONASS supported
-    bw.writeU(1, 1);                      // Galileo supported
-    bw.writeU(1, if (non_physical) 1 else 0);  // reference station indicator
+    bw.writeU(6, 0); // ITRF realization year
+    bw.writeU(1, 1); // GPS supported
+    bw.writeU(1, 1); // GLONASS supported
+    bw.writeU(1, 1); // Galileo supported
+    bw.writeU(1, if (non_physical) 1 else 0); // reference station indicator
 
     const x_q: i64 = @intFromFloat(@round(ecef[0] / 0.0001));
     const y_q: i64 = @intFromFloat(@round(ecef[1] / 0.0001));
     const z_q: i64 = @intFromFloat(@round(ecef[2] / 0.0001));
 
     bw.writeS(38, x_q);
-    bw.writeU(1, 0);                      // single receiver oscillator
-    bw.writeU(1, 0);                      // reserved
+    bw.writeU(1, 0); // single receiver oscillator
+    bw.writeU(1, 0); // reserved
     bw.writeS(38, y_q);
-    bw.writeU(1, 0);                      // quarter cycle indicator
+    bw.writeU(1, 0); // quarter cycle indicator
     bw.writeS(38, z_q);
 
     // CRC-24Q
@@ -378,7 +538,7 @@ pub fn encodeMsg1008(
     serial: []const u8,
 ) ![]u8 {
     if (ref_station_id > 0xFFF) return error.RefIdOutOfRange;
-    if (descriptor.len > 31) return error.DescriptorTooLong;  // RTCM 仕様上限 31
+    if (descriptor.len > 31) return error.DescriptorTooLong; // RTCM 仕様上限 31
     if (serial.len > 31) return error.SerialTooLong;
 
     const payload_bytes: usize = 6 + descriptor.len + serial.len;
@@ -391,12 +551,12 @@ pub fn encodeMsg1008(
     buf[2] = @truncate(payload_bytes & 0xFF);
 
     var bw = BitWriter.init(buf[3 .. 3 + payload_bytes]);
-    bw.writeU(12, 1008);                                       // message number
+    bw.writeU(12, 1008); // message number
     bw.writeU(12, ref_station_id);
-    bw.writeU(8, @intCast(descriptor.len));                    // descriptor counter N
+    bw.writeU(8, @intCast(descriptor.len)); // descriptor counter N
     for (descriptor) |c| bw.writeU(8, c);
-    bw.writeU(8, 0);                                           // antenna setup id
-    bw.writeU(8, @intCast(serial.len));                        // serial counter M
+    bw.writeU(8, 0); // antenna setup id
+    bw.writeU(8, @intCast(serial.len)); // serial counter M
     for (serial) |c| bw.writeU(8, c);
 
     const rtcm3 = @import("../ntrip/rtcm3.zig");
