@@ -681,6 +681,32 @@ test "fkp: FkpSnapshotStore update + snapshot roundtrip" {
     try std.testing.expect(snap.params.ptr != snap2.params.ptr);
 }
 
+test "fkp: FkpSnapshotStore accepts empty params (Phase 6a all-dropped case)" {
+    // Phase 6a で全 PRN が閾値棄却されたとき、runtime は empty params を
+    // update に渡す。snapshot は valid な ref_coord と empty params を返し、
+    // VRS 側で applyPhaseCorrection no-op success として扱える。
+    var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const params = [_]fkp_engine.FkpParam{};
+    const ref = fkp_msm7.StationCoord{
+        .ref_station_id = 1,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat = 0.5,
+        .lon = 1.0,
+    };
+    store.update(&params, ref);
+
+    const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
+    defer snap.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), snap.params.len);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), snap.ref_coord.lat, 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), snap.ref_coord.lon, 1e-12);
+}
+
 test "fkp: FkpSnapshotStore second update replaces first without leak" {
     var store = fkp_runtime.FkpSnapshotStore.init(std.testing.allocator);
     defer store.deinit();

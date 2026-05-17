@@ -350,6 +350,16 @@ fn runOneFkpCycle(rt: *Runtime) void {
         return;
     };
     rt.fkp_dropped_excess_total += fkp_stats.dropped_excess;
+
+    // VRS など下流コンポーネント向けに最新スナップショットを更新。
+    // 主上流 = stations[0] の coord を ref として記録。
+    //
+    // Phase 6a: fkp_params が空 (全 PRN 棄却 / overlap なし) でも update を
+    // 呼ぶ。VRS 側は empty deltas で applyPhaseCorrection を no-op success
+    // として扱える (snapshot==null path に落ちて frames_correction_failed
+    // を増やすより semantically clean)。
+    rt.latest_fkp.update(fkp_params, stations.items[0].coord);
+
     if (fkp_params.len == 0) {
         rt.state.logger.warn(
             "[fkp] no parameters produced (singular matrix or all dropped: excess={d})",
@@ -357,11 +367,6 @@ fn runOneFkpCycle(rt: *Runtime) void {
         );
         return;
     }
-
-    // VRS など下流コンポーネント向けに最新スナップショットを更新。
-    // 主上流 = stations[0] (= upstreams[0] が takeSnapshot に成功した場合)
-    // の coord を ref として記録する。
-    rt.latest_fkp.update(fkp_params, stations.items[0].coord);
 
     // Type59 エンコード
     const tow_ms: u32 = @truncate(@as(u64, @intCast(std.time.timestamp())) % (7 * 24 * 3600) * 1000);

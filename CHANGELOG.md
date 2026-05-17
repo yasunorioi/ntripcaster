@@ -278,7 +278,21 @@ geometric range removal を入れる必要あり。
   - 新規 3 件追加 — 過大入力で PRN 棄却 + stats.dropped_excess=1 /
     物理妥当入力で PRN 通過 + DEFAULT 閾値 100 以下 / 同入力でも
     `max_magnitude=0.1` の厳格閾値で棄却される。
+- Phase 6a-4 微調整: `runtime.runOneFkpCycle` で computeFkp が 0 params を
+  返した場合でも `latest_fkp.update(empty, ref_coord)` を呼ぶように変更。
+  VRS 側で empty deltas → applyPhaseCorrection no-op success (CRC 再計算)
+  → `frames_phase_corrected++` となり、設計メモ § 4.2 が意図した「設計通り
+  no-op fallback」が `frames_correction_failed` に誤計上されない。
+  `tests/test_fkp.zig` に "FkpSnapshotStore accepts empty params" 1 件追加。
 - 動作: docker 内 `zig build test` 全通過 (exit=0)。
+- 実機確認 (docker + centipede-paris.conf):
+  - 起動後 FKP は毎 cycle `dropped_excess=8〜13` (= Paris triangle で
+    生 LIF が全 PRN ともに閾値超過、設計メモ § 8-1 の予測値そのまま)
+  - rover (python str2str 相当) 30s 接続切断サマリ:
+    `frames_fwd=438 ref_id_rewritten=221 phase_corrected=92 corr_failed=0`
+    — Phase 5a (ref_id 書き換え) は維持、補正は no-op fallback、失敗
+    カウンタはゼロ。配線済みの Phase 5b-3 を破壊しない safety net として
+    意図通り動作。
 
 **未着手 (Phase 6 残り)**:
 - ⚠️ Phase 6b (rough_range residual + DD + 簡易 ambiguity) を別ブランチ
