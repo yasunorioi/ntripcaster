@@ -199,10 +199,50 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
   他 cell 不変)。
 - 既存 vrs.zig 内 test 3 件のシグネチャを `forwardFiltered(..., null)` に更新。
 
-**未着手 (Phase 5b 本実装の残)**:
-- ⚠️ Phase 5b-3 実機検証。centipede.fr 上流で実際の VRS rover (RTKLIB str2str
-  等) を接続し位置精度を測定する。ローカル Zig (0.15.2 / macOS 26) が
-  build 通らないため別環境または CI 環境で。
+**Phase 5b-3 実機検証 (docker 上 caster + python rover で完了)**:
+
+ローカル macOS 26 で host Zig が link 通らないので、`ntripcaster-zig:0.15.2`
+(linux/arm64) docker コンテナで `zig build -Doptimize=ReleaseSafe` してから
+`conf/centipede-paris.conf` (CROI/IPGP/SGC + VRS_PARIS) で起動、Python rover
+スクリプトで /VRS_PARIS に GGA 付き接続して 30 秒キャプチャ。`zig build test`
+も docker 内で全通過 (exit=0、Phase 5b 追加 16 件含む)。
+
+✅ **配線・整合性は完全動作**:
+- caster 切断サマリ: `phase_corrected=67 corr_failed=0 ref_id_rewritten=196
+  inject_1005=6` — applyPhaseCorrection が MSM7 67 frames に対して 0 失敗で
+  適用、CRC 再計算も正常 (python decoder が全 frame parse 成功)。
+- Phase 5a (ref_id 書き換え) は station_id 持ち全 198 frames が
+  ref_id=0x801 (= 0x800 | rover_id) に揃って完璧。
+- SBAS (1107) / BDS (1127) は band=.unknown で no-op 透過、設計通り
+  (gpsBandFromSigId が GPS table のため)。
+
+⚠️ **発見: 補正値の magnitude が物理的に大きすぎる (Phase 6 案件)**:
+
+`/FKP_PARIS` (raw) と `/VRS_PARIS` (補正済) の同一 epoch diff を計測した結果、
+fine_phase の差分が GPS で平均 730 mm、GLO で 1.6 m、Galileo で 320 mm。
+fine_phase の値域 ±4.7 m を完全に超えて `[-2^23+1, 2^23-1]` クランプにヒット。
+本来 50 km baseline での FKP 補正は mm-cm scale が物理的妥当範囲。
+
+真因: `engine.zig::computeFkp` が田中 2003 § 4.3.4 そのままの実装で、
+`lif = α·L1 − β·L2` は ionosphere-free だが geometry (衛星〜局の幾何距離、
+km scale) が残ったまま。これを 3 局の lat/lon 差 (~0.001 rad) の inv で
+割ると n_0/e_0 が数千〜数万 m/rad に膨らみ、rover offset ~0.013 rad を
+掛けて数 100 m〜数 km の補正値になる。
+本来は衛星 ephemeris から各局-衛星距離を引いた double-difference 残差を
+入力にする必要があり (Tanaka § 4.3.2 の前提)、現実装はそのステップを
+省いていた。
+
+**結論**: Phase 5b の責務 (MSM7 補正適用の仕組み実装) は完了。位置精度
+改善のためには別途 `engine.zig::computeFkp` の改修 (Phase 6 候補) で
+geometric range removal を入れる必要あり。
+
+**未着手 (Phase 6 候補)**:
+- ⚠️ `engine.zig::computeFkp` の改修。各 PhaseObs に対応する衛星 ECEF
+  位置を ephemeris (1019/1020/1042/1045/1046) から取得して、各局-衛星
+  geometric range を引いた residual で LIF/LGF を計算する。これで FKP
+  値が atmospheric scale (mm-cm) に収まり、rover の RTK fix 品質が
+  実際に向上する。スコープ大きい (ephemeris parse + 衛星 ECEF 計算 +
+  時刻同期 + dual-frequency 整合) ので Phase 6 として別枠で着手する。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
