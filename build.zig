@@ -14,13 +14,29 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // ── build options (comptime-baked flags) ───────────────────────────────
+    const options_step = b.addOptions();
+    options_step.addOption(
+        bool,
+        "vrs_inject_antenna",
+        b.option(bool, "vrs-inject-antenna", "Inject RTCM3 Type 1008 antenna descriptor for VRS rovers") orelse false,
+    );
+    const options_mod = options_step.createModule();
+
     // ── "ntripcaster" library module (src/ tree exposed for tests) ──────────
     const ntripcaster_mod = b.addModule("ntripcaster", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "build_options", .module = options_mod },
+        },
     });
 
     // ── Main executable ────────────────────────────────────────────────────
+    // build_options を直接 imports に入れているのは、vrs.zig が
+    // `@import("build_options")` を持つため。lib.zig 経由 (ntripcaster_mod) の
+    // `.imports` だけだと Zig 0.15.2 ではトランジティブに解決されず
+    // 「no module named 'build_options' available within module 'root'」になる。
     const exe = b.addExecutable(.{
         .name = "ntripcaster",
         .root_module = b.createModule(.{
@@ -29,6 +45,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ntripcaster", .module = ntripcaster_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
@@ -48,6 +65,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ntripcaster", .module = ntripcaster_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
@@ -60,6 +78,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/lib.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = options_mod },
+            },
         }),
     });
 
@@ -76,6 +97,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ntripcaster", .module = ntripcaster_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });
@@ -90,6 +112,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "ntripcaster", .module = ntripcaster_mod },
+                .{ .name = "build_options", .module = options_mod },
             },
         }),
     });

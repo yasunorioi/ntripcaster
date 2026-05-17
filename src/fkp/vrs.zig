@@ -28,6 +28,11 @@ const relay = @import("../relay/engine.zig");
 const rtcm3 = @import("../ntrip/rtcm3.zig");
 const msm7 = @import("msm7.zig");
 
+/// build option (default false)。`-Dvrs-inject-antenna=true` で有効化。
+/// build_options モジュールはルート側 build.zig で options_mod として作成され、
+/// ntripcaster_mod / src_tests / fkp_demo 等の `.imports` 経由で配線される。
+const build_options = @import("build_options");
+
 // ── VRS 設定 ───────────────────────────────────────────────────────────────
 
 /// VRS 用設定。`parser.Config` から `Runtime.create()` 時にコピーされる。
@@ -567,7 +572,22 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
             "[vrs] rover id={d} first inject 1005: ref_id=0x{X:0>3} ({d}) ecef=({d:.3},{d:.3},{d:.3})",
             .{ rover.id, ref_id, ref_id, ecef[0], ecef[1], ecef[2] },
         );
+        // build option で有効時のみ Antenna Descriptor (1008) も一緒に送る。
+        // VRS rover に「ちゃんとした基準局」として認識させる用。
+        // -Dvrs-inject-antenna=true でビルドした場合のみコードが残る。
+        if (comptime build_options.vrs_inject_antenna) {
+            injectAntenna(rover, ref_id) catch {};
+        }
     }
+}
+
+fn injectAntenna(rover: *VrsRover, ref_id: u16) !void {
+    var serial_buf: [16]u8 = undefined;
+    const serial = std.fmt.bufPrint(&serial_buf, "VRS{X:0>3}", .{ref_id}) catch return;
+    const frame = msm7.encodeMsg1008(rover.alloc, ref_id, "NTRIP_VRS NONE", serial) catch return;
+    defer rover.alloc.free(frame);
+    rover.stream.writeAll(frame) catch return error.WriteFailed;
+    rover.bytes_out += frame.len;
 }
 
 // ── 距離 ──────────────────────────────────────────────────────────────────
@@ -770,6 +790,30 @@ test "vrs: encodeMsg1005 + parseMsg1005 roundtrip preserves 12-bit ref_id" {
 test "vrs: encodeMsg1005 rejects ref_id > 12 bits" {
     const buf = msm7.encodeMsg1005(testing.allocator, 0x4001, .{ 0, 0, 0 }, false);
     try testing.expectError(error.RefIdOutOfRange, buf);
+}
+
+test "vrs: encodeMsg1008 produces valid RTCM3 frame with msg_type=1008" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const frame = try msm7.encodeMsg1008(a, 0x801, "NTRIP_VRS NONE", "VRS801");
+    // parseFrame should accept this frame and report msg_type 1008
+    const fr = rtcm3.parseFrame(frame) orelse return error.ParseFailed;
+    try testing.expectEqual(@as(u16, 1008), fr.msg_type);
+    try testing.expectEqual(frame.len, fr.consumed);
+    // payload size = 6 + 14 + 6 = 26 bytes、フレーム = 3 + 26 + 3 = 32 bytes
+    try testing.expectEqual(@as(usize, 32), frame.len);
+}
+
+test "vrs: encodeMsg1008 rejects too-long fields" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const long = "0123456789012345678901234567890123456789";  // 40 chars
+    try testing.expectError(error.DescriptorTooLong, msm7.encodeMsg1008(a, 0x801, long, "x"));
+    try testing.expectError(error.SerialTooLong, msm7.encodeMsg1008(a, 0x801, "x", long));
+    try testing.expectError(error.RefIdOutOfRange, msm7.encodeMsg1008(a, 0x1234, "x", "y"));
 }
 
 test "vrs: parseDdmm round trip with known values" {

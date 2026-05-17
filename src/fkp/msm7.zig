@@ -362,6 +362,50 @@ pub fn encodeMsg1005(
     return buf;
 }
 
+/// RTCM3 Type 1008 (Antenna Descriptor + Serial Number) フレームを生成する。
+/// 1007 (descriptor のみ) の上位互換。VRS rover に「ちゃんとした基準局」と
+/// 認識させるためのメタデータ。送信頻度は低 (起動時 1 回で十分)。
+///
+/// payload: 12 + 12 + 8 + 8*N + 8 + 8 + 8*M = 48 + 8*(N+M) bits = 6 + N + M bytes
+///   msg_num(12) + ref_id(12) + N(8) + descriptor(8*N) +
+///   setup_id(8) + M(8) + serial(8*M)
+pub fn encodeMsg1008(
+    allocator: std.mem.Allocator,
+    ref_station_id: u16,
+    descriptor: []const u8,
+    serial: []const u8,
+) ![]u8 {
+    if (ref_station_id > 0xFFF) return error.RefIdOutOfRange;
+    if (descriptor.len > 31) return error.DescriptorTooLong;  // RTCM 仕様上限 31
+    if (serial.len > 31) return error.SerialTooLong;
+
+    const payload_bytes: usize = 6 + descriptor.len + serial.len;
+    const frame_len: usize = 3 + payload_bytes + 3;
+    const buf = try allocator.alloc(u8, frame_len);
+    @memset(buf, 0);
+
+    buf[0] = 0xD3;
+    buf[1] = @truncate((payload_bytes >> 8) & 0x03);
+    buf[2] = @truncate(payload_bytes & 0xFF);
+
+    var bw = BitWriter.init(buf[3 .. 3 + payload_bytes]);
+    bw.writeU(12, 1008);                                       // message number
+    bw.writeU(12, ref_station_id);
+    bw.writeU(8, @intCast(descriptor.len));                    // descriptor counter N
+    for (descriptor) |c| bw.writeU(8, c);
+    bw.writeU(8, 0);                                           // antenna setup id
+    bw.writeU(8, @intCast(serial.len));                        // serial counter M
+    for (serial) |c| bw.writeU(8, c);
+
+    const rtcm3 = @import("../ntrip/rtcm3.zig");
+    const crc = rtcm3.crc24q(buf[0 .. 3 + payload_bytes]);
+    buf[3 + payload_bytes + 0] = @truncate(crc >> 16);
+    buf[3 + payload_bytes + 1] = @truncate(crc >> 8);
+    buf[3 + payload_bytes + 2] = @truncate(crc);
+
+    return buf;
+}
+
 /// ECEF → WGS84 緯度経度 [rad, rad]
 ///
 /// 単純直接反復法（Borkowski 1989 / Bowring simple iteration）:
