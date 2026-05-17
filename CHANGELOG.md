@@ -96,10 +96,23 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
   ことを python decoder で確認。ephemeris (1019/1020/1042/1045/1046) は
   station_id 持たないので透過。
 
-**未解決**:
-- ⚠️ Phase 5b: FKP 補正適用。MSM7 encoder + 主上流位置→rover 位置への
-  搬送波位相補正 (engine.computeFkp の出力使用)。位置精度を実際に
-  改善する本命作業。
+**Phase 5b 設計メモ作成 (`docs/phase5b-design.md`)**:
+- RTCM3 MSM7 ペイロード bit レイアウト (header / sat data / signal data)
+  を整理 + extractPhase が捨てている情報の特定。
+- `applyPhaseCorrection(frame, phase_delta)` の in-place 書き換え API 案
+  を提示 (struct 経由案も比較)。完全 parse → 補正 → 完全 encode より
+  軽量で、メモリコピー 1 回 + CRC 再計算で済む。
+- 補正数式 (Phase 4c 設計から再掲): `ΔΦ_rover = ΔΦ_master + N_I·dN + E_I·dE`、
+  L2/L5 周波数依存補正の扱い、GLONASS FDMA の channel 計算メモ。
+- roundtrip テスト設計 + forwardFiltered への組み込み点。
+- 残課題 8 件 (cell_mask=false の signal data 有無 / FkpParam スナップ
+  ショット保持 / 補正失敗時のフォールバック等) を表で列挙。
+- 作業見積もり: 5b-1 (encoder+test) 2-3h、5b-2 (FKP snapshot) 30m、5b-3
+  (実機検証) 1-2h → 合計 ~5h で次セッション 1 本で完結見込み。
+
+**未着手 (Phase 5b 本実装)**:
+- ⚠️ MSM7 encoder + FKP 補正適用 + forwardFiltered 組み込み。位置精度
+  を実際に改善する本命作業。設計メモに沿って次セッションで進める。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
