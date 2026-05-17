@@ -77,6 +77,8 @@ pub const VrsRover = struct {
     initial_gga_logged: bool = false,
     /// この rover に inject1005 した累計
     inject_1005_count: u64 = 0,
+    /// この rover に inject1008 した累計 (build option 有効時のみ加算)
+    inject_1008_count: u64 = 0,
     /// forwardFiltered が転送した RTCM3 フレーム累計
     frames_forwarded: u64 = 0,
     /// forwardFiltered が drop した RTCM3 フレーム累計 (msg_type=59/1005/1006)
@@ -244,7 +246,7 @@ pub const Runtime = struct {
         runRoverLoop(self, rover);
         self.state.logger.info(
             "[vrs] rover disconnected: id={d} in={d}B out={d}B uptime={d}s " ++
-                "frames_fwd={d} drop_total={d} (1005={d} 1006={d} 59={d}) inject_1005={d} has_pos={any}",
+                "frames_fwd={d} drop_total={d} (1005={d} 1006={d} 59={d}) inject_1005={d} inject_1008={d} has_pos={any}",
             .{
                 id,
                 rover.bytes_in,
@@ -256,6 +258,7 @@ pub const Runtime = struct {
                 rover.frames_dropped_1006,
                 rover.frames_dropped_59,
                 rover.inject_1005_count,
+                rover.inject_1008_count,
                 rover.has_position,
             },
         );
@@ -572,22 +575,35 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
             "[vrs] rover id={d} first inject 1005: ref_id=0x{X:0>3} ({d}) ecef=({d:.3},{d:.3},{d:.3})",
             .{ rover.id, ref_id, ref_id, ecef[0], ecef[1], ecef[2] },
         );
-        // build option で有効時のみ Antenna Descriptor (1008) も一緒に送る。
-        // VRS rover に「ちゃんとした基準局」として認識させる用。
-        // -Dvrs-inject-antenna=true でビルドした場合のみコードが残る。
-        if (comptime build_options.vrs_inject_antenna) {
-            injectAntenna(rover, ref_id) catch {};
+    }
+
+    // build option で有効時のみ Antenna Descriptor (1008) を 1005 の直後に挟む。
+    // RTCM 推奨: 1005 の約半分のレート、観測メッセージの間には挟まない。
+    // 1005 の偶数回目 (= 2 回に 1 回) で送る → 半レート。
+    // 標準ビルドからは comptime if で完全に消える。
+    if (comptime build_options.vrs_inject_antenna) {
+        if (rover.inject_1005_count % 2 == 1) {  // 初回 + 3回目 + 5回目 ...
+            injectAntenna(rt, rover, ref_id) catch {};
         }
     }
 }
 
-fn injectAntenna(rover: *VrsRover, ref_id: u16) !void {
-    var serial_buf: [16]u8 = undefined;
-    const serial = std.fmt.bufPrint(&serial_buf, "VRS{X:0>3}", .{ref_id}) catch return;
-    const frame = msm7.encodeMsg1008(rover.alloc, ref_id, "NTRIP_VRS NONE", serial) catch return;
+/// Antenna Descriptor (RTCM3 1008) を送る。descriptor は "ADVNULLANTENNA NONE"
+/// (NONE = radome なし) を使用 — esp32-xbee #13 / SNIP DavidKelleySCSC 推奨:
+/// 「ベース局側で既に PCO/PCV 補正済み」を意味し、Trimble rover の 95% で OK。
+/// serial は空文字列で十分。
+fn injectAntenna(rt: *Runtime, rover: *VrsRover, ref_id: u16) !void {
+    const frame = msm7.encodeMsg1008(rover.alloc, ref_id, "ADVNULLANTENNA NONE", "") catch return;
     defer rover.alloc.free(frame);
     rover.stream.writeAll(frame) catch return error.WriteFailed;
     rover.bytes_out += frame.len;
+    rover.inject_1008_count += 1;
+    if (rover.inject_1008_count == 1) {
+        rt.state.logger.info(
+            "[vrs] rover id={d} first inject 1008: ref_id=0x{X:0>3} desc='ADVNULLANTENNA NONE'",
+            .{ rover.id, ref_id },
+        );
+    }
 }
 
 // ── 距離 ──────────────────────────────────────────────────────────────────
