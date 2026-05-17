@@ -81,11 +81,25 @@ VRS (Virtual Reference Station) Phase 4a (GGA 受信) + 4b-lite (Type 1005 注�
 - `tests/test_rtcm3.zig`: 呼び出し側 slice 範囲の正しさを示す regression
   test 追加。
 
+**Phase 5a: MSM7 / legacy obs / 1033 / 1230 の ref_id 書き換え (実装済)**:
+- VRS 注入 1005 と upstream の MSM7 等が rover 側で同一 station として
+  correlate するよう、station_id を持つメッセージ (1001..1012 / 1033 /
+  1071..1077 / 1081..1087 / 1091..1097 / 1101..1107 / 1111..1117 /
+  1121..1127 / 1131..1137 / 1230) の payload bits 12-23 を rover.vrs_ref_id
+  に書き換え + CRC-24Q 再計算して forwardFiltered で送信。
+- VrsRover に `vrs_ref_id` フィールド (12-bit, 0x800..0xFFF) を持たせ、
+  inject1005 / inject1008 / MSM7 書き換えで共通使用 → rover は全メッセージ
+  を単一基準局として認識。
+- `frames_ref_id_rewritten` カウンタ + 切断時サマリに記録。
+- 実機検証 (centipede.fr, 25 秒): rover 側で全 station_id 持ちフレーム
+  (1004/1012/1033/1077/1087/1097/1107/1127) が ref_id=0x801 に揃った
+  ことを python decoder で確認。ephemeris (1019/1020/1042/1045/1046) は
+  station_id 持たないので透過。
+
 **未解決**:
-- ⚠️ Phase 5: MSM7 ref_id が upstream の値 (=1) のまま rover に届き、
-  VRS 注入 1005 の ref_id (0x801) と一致しないため rover が
-  「異なる station からの観測」として扱う。MSM7 encoder + ref_id
-  書き換えが必要 (Phase 5 design)。
+- ⚠️ Phase 5b: FKP 補正適用。MSM7 encoder + 主上流位置→rover 位置への
+  搬送波位相補正 (engine.computeFkp の出力使用)。位置精度を実際に
+  改善する本命作業。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 

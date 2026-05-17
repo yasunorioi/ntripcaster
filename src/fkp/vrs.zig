@@ -60,6 +60,11 @@ pub const VrsRover = struct {
     started_at_ms: i64,
     alloc: std.mem.Allocator,
 
+    /// この rover に見せる仮想基準局 ID (12-bit, 0x800..0xFFF)。create() で
+    /// 計算して固定。inject1005 / inject1008 / MSM7 ref_id 書き換えの全てで
+    /// 同じ値を使うことで rover 側が単一の基準局として認識する。
+    vrs_ref_id: u16,
+
     /// 最新の GGA から得た rover 位置 [deg, deg, m]
     /// has_position == false のあいだは合成停止 (= rover にデータ流さない)
     lock: std.Thread.Mutex = .{},
@@ -81,6 +86,9 @@ pub const VrsRover = struct {
     inject_1008_count: u64 = 0,
     /// forwardFiltered が転送した RTCM3 フレーム累計
     frames_forwarded: u64 = 0,
+    /// forwardFiltered で ref_id を VRS 値に書き換えたフレーム累計
+    /// (MSM7 / legacy obs / 1033 / 1230 等、station_id を持つメッセージ)
+    frames_ref_id_rewritten: u64 = 0,
     /// forwardFiltered が drop した RTCM3 フレーム累計 (msg_type=59/1005/1006)
     frames_dropped: u64 = 0,
     /// drop した中で msg_type=1005 だったフレーム累計 (1005 漏れ調査用)
@@ -103,6 +111,7 @@ pub const VrsRover = struct {
             .peer_addr = peer_addr,
             .started_at_ms = std.time.milliTimestamp(),
             .alloc = alloc,
+            .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)),
         };
         return r;
     }
@@ -245,14 +254,17 @@ pub const Runtime = struct {
         self.state.logger.info("[vrs] rover connected: id={d}", .{id});
         runRoverLoop(self, rover);
         self.state.logger.info(
-            "[vrs] rover disconnected: id={d} in={d}B out={d}B uptime={d}s " ++
-                "frames_fwd={d} drop_total={d} (1005={d} 1006={d} 59={d}) inject_1005={d} inject_1008={d} has_pos={any}",
+            "[vrs] rover disconnected: id={d} vrs_ref_id=0x{X:0>3} in={d}B out={d}B uptime={d}s " ++
+                "frames_fwd={d} ref_id_rewritten={d} drop_total={d} (1005={d} 1006={d} 59={d}) " ++
+                "inject_1005={d} inject_1008={d} has_pos={any}",
             .{
                 id,
+                rover.vrs_ref_id,
                 rover.bytes_in,
                 rover.bytes_out,
                 @divTrunc(std.time.milliTimestamp() - rover.started_at_ms, 1000),
                 rover.frames_forwarded,
+                rover.frames_ref_id_rewritten,
                 rover.frames_dropped,
                 rover.frames_dropped_1005,
                 rover.frames_dropped_1006,
@@ -503,42 +515,92 @@ fn parseDdmm(s: []const u8, deg_digits: usize) ?f64 {
     return deg + min / 60.0;
 }
 
-// ── フレームフィルタ + 1005 注入 ──────────────────────────────────────────
+// ── フレームフィルタ + 1005 注入 + MSM7 ref_id 書き換え ────────────────────
+
+/// 該当 msg_type の payload bits 12-23 が "Reference Station ID" かを判定。
+/// RTCM 10403.3 で station_id を含むメッセージ:
+/// - 1001..1004: legacy GPS observations
+/// - 1005..1008: station coordinates / antenna descriptor
+/// - 1009..1012: legacy GLONASS observations
+/// - 1033: receiver/antenna descriptor
+/// - 1071..1077, 1081..1087, 1091..1097, 1101..1107, 1111..1117, 1121..1127,
+///   1131..1137: MSM1-7 for GPS/GLO/Gal/SBAS/QZSS/BDS/IRNSS
+/// - 1230: GLONASS code-phase biases
+fn rtcmHasStationId(msg_type: u16) bool {
+    return switch (msg_type) {
+        1001...1012,
+        1033,
+        1071...1077,
+        1081...1087,
+        1091...1097,
+        1101...1107,
+        1111...1117,
+        1121...1127,
+        1131...1137,
+        1230,
+        => true,
+        else => false,
+    };
+}
+
+/// `frame` (RTCM3 1 フレーム全体 = preamble + length + payload + CRC) の
+/// payload bits 12-23 (= byte[1] 下位 4bit + byte[2]) を `new_ref_id` に
+/// 書き換えて CRC-24Q を再計算する。`new_ref_id` は 12 bit 必須。
+/// payload 長 < 3 byte の場合は何もしない (= station_id 欠落フレーム)。
+fn rewriteRefIdInFrame(frame: []u8, new_ref_id: u16) void {
+    std.debug.assert(new_ref_id <= 0xFFF);
+    if (frame.len < 8) return;
+    const length: usize = (@as(usize, frame[1] & 0x03) << 8) | frame[2];
+    if (length < 3) return;
+    if (frame.len < 3 + length + 3) return;
+
+    // payload[1] 上位 4bit = msg_type の下位 4bit (温存)。下位 4bit = ref_id 上位 4bit。
+    frame[3 + 1] = (frame[3 + 1] & 0xF0) | @as(u8, @truncate((new_ref_id >> 8) & 0x0F));
+    frame[3 + 2] = @truncate(new_ref_id & 0xFF);
+
+    const crc = rtcm3.crc24q(frame[0 .. 3 + length]);
+    frame[3 + length + 0] = @truncate((crc >> 16) & 0xFF);
+    frame[3 + length + 1] = @truncate((crc >> 8) & 0xFF);
+    frame[3 + length + 2] = @truncate(crc & 0xFF);
+}
 
 /// `buf` の先頭からスキャンし、完全な RTCM3 フレームを `writer` に書き出す。
-/// Type 1005 と Type 59 は除外 (1005 は別途 inject、59 は VRS では不要)。
+/// Type 1005 / 1006 / 59 は除外、MSM7 等の station_id 保持メッセージは
+/// rover.vrs_ref_id に書き換えてから送る (Phase 5a)。
 /// 不完全フレーム手前まで進めて `consumed` バイト数を返す。
-/// `writer` は `writeAll([]const u8) !void` を持つ任意の型 (std.net.Stream / TestWriter)。
-/// `rover` がフィルタ統計の更新先 (nullable は不可、テストでも dummy を渡す)。
 fn forwardFiltered(writer: anytype, buf: []const u8, rover: *VrsRover) !usize {
+    // RTCM3 frame max size = 3 + 1023 + 3 = 1029 byte (length は 10 bit)。
+    var scratch: [3 + 1023 + 3]u8 = undefined;
+
     var pos: usize = 0;
     while (pos < buf.len) {
         if (buf[pos] != rtcm3.PREAMBLE) {
             pos += 1;
             continue;
         }
-        if (buf.len - pos < 6) break;  // ヘッダ未到達 (preamble + length + CRC)
+        if (buf.len - pos < 6) break;
         const fr = rtcm3.parseFrame(buf[pos..]) orelse {
-            // CRC 不一致 or 未完: 1 バイト進めて再試行
-            // ただしフレーム長分のバイトが揃っている (未完ではない) ことが
-            // parseFrame の戻り null の主因なので、CRC 失敗とみなしてシフト
             const length: usize = (@as(usize, buf[pos + 1] & 0x03) << 8) | buf[pos + 2];
-            if (buf.len - pos < 3 + length + 3) break;  // 未完 → 待つ
+            if (buf.len - pos < 3 + length + 3) break;
             pos += 1;
             continue;
         };
-        // 1005/1006 は VRS 側で rover 位置の仮想基準局として注入するので
-        // upstream のものは捨てる (1006 は 1005 + Antenna Height で機能的に
-        // 等価。rover に異なる ref_id の 1005 と 1006 が両方届くと conflict)。
-        // 59 は FKP runtime が virtual source に injection している補正で
-        // VRS rover には不要 (rover は FKP_PARIS ではなく VRS_PARIS を購読)。
         const drop = (fr.msg_type == 59) or (fr.msg_type == 1005) or (fr.msg_type == 1006);
         if (drop) {
             rover.frames_dropped += 1;
             if (fr.msg_type == 1005) rover.frames_dropped_1005 += 1;
             if (fr.msg_type == 1006) rover.frames_dropped_1006 += 1;
             if (fr.msg_type == 59) rover.frames_dropped_59 += 1;
+        } else if (rtcmHasStationId(fr.msg_type)) {
+            // station_id 含む → scratch にコピーして書き換え + CRC 再計算 → 送信
+            @memcpy(scratch[0..fr.consumed], buf[pos .. pos + fr.consumed]);
+            rewriteRefIdInFrame(scratch[0..fr.consumed], rover.vrs_ref_id);
+            writer.writeAll(scratch[0..fr.consumed]) catch return error.WriteFailed;
+            rover.bytes_out += fr.consumed;
+            rover.frames_forwarded += 1;
+            rover.frames_ref_id_rewritten += 1;
         } else {
+            // station_id なし (ephemeris 等) → そのまま transparent forward
             writer.writeAll(buf[pos .. pos + fr.consumed]) catch return error.WriteFailed;
             rover.bytes_out += fr.consumed;
             rover.frames_forwarded += 1;
@@ -553,14 +615,7 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
     const lat_rad = lat_deg * std.math.pi / 180.0;
     const lon_rad = lon_deg * std.math.pi / 180.0;
     const ecef = msm7.latLonAltToEcef(lat_rad, lon_rad, alt_m);
-
-    // RTCM 1005 Reference Station ID は 12 bit (0..4095) しか収まらないため、
-    // 仮想マーカーは高位ビット 0x800 + 下位 11 bit を rover.id にする
-    // (range: 2048..4095, 通常の実基準局 ID とは別空間)。
-    // 旧コードは 0x4000 マーカーを使っていたが encodeMsg1005 の writeU(12, ...)
-    // で truncate されて rover からは ref_id=1 にしか見えなかった (Phase 4
-    // 既知問題の根因)。
-    const ref_id: u16 = @truncate(0x800 | (rover.id & 0x7FF));
+    const ref_id = rover.vrs_ref_id;
 
     const frame = msm7.encodeMsg1005(rover.alloc, ref_id, ecef, true) catch return;
     defer rover.alloc.free(frame);
@@ -583,7 +638,7 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
     // 標準ビルドからは comptime if で完全に消える。
     if (comptime build_options.vrs_inject_antenna) {
         if (rover.inject_1005_count % 2 == 1) {  // 初回 + 3回目 + 5回目 ...
-            injectAntenna(rt, rover, ref_id) catch {};
+            injectAntenna(rt, rover) catch {};
         }
     }
 }
@@ -592,8 +647,8 @@ fn inject1005(rt: *Runtime, rover: *VrsRover, lat_deg: f64, lon_deg: f64, alt_m:
 /// (NONE = radome なし) を使用 — esp32-xbee #13 / SNIP DavidKelleySCSC 推奨:
 /// 「ベース局側で既に PCO/PCV 補正済み」を意味し、Trimble rover の 95% で OK。
 /// serial は空文字列で十分。
-fn injectAntenna(rt: *Runtime, rover: *VrsRover, ref_id: u16) !void {
-    const frame = msm7.encodeMsg1008(rover.alloc, ref_id, "ADVNULLANTENNA NONE", "") catch return;
+fn injectAntenna(rt: *Runtime, rover: *VrsRover) !void {
+    const frame = msm7.encodeMsg1008(rover.alloc, rover.vrs_ref_id, "ADVNULLANTENNA NONE", "") catch return;
     defer rover.alloc.free(frame);
     rover.stream.writeAll(frame) catch return error.WriteFailed;
     rover.bytes_out += frame.len;
@@ -601,7 +656,7 @@ fn injectAntenna(rt: *Runtime, rover: *VrsRover, ref_id: u16) !void {
     if (rover.inject_1008_count == 1) {
         rt.state.logger.info(
             "[vrs] rover id={d} first inject 1008: ref_id=0x{X:0>3} desc='ADVNULLANTENNA NONE'",
-            .{ rover.id, ref_id },
+            .{ rover.id, rover.vrs_ref_id },
         );
     }
 }
@@ -646,38 +701,45 @@ const CaptureWriter = struct {
     }
 };
 
-/// テスト用: 任意の msg_type を持つ 2-byte payload の RTCM3 フレームを作る。
+/// テスト用: 任意の msg_type + ref_id を持つ 3-byte payload の RTCM3 フレームを作る。
+/// payload[0..1] = msg_type (12bit), payload[1..2] 下位 12bit = ref_id。
 fn makeDummyFrame(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, msg_type: u16) !void {
-    // payload (2 bytes): msg_type(12bit MSB) + 4 bit 0
+    return makeDummyFrameRid(buf, alloc, msg_type, 0);
+}
+
+fn makeDummyFrameRid(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, msg_type: u16, ref_id: u16) !void {
     const payload0: u8 = @truncate((msg_type >> 4) & 0xFF);
-    const payload1: u8 = @truncate((msg_type & 0x0F) << 4);
-    var frame: [8]u8 = .{ 0xD3, 0x00, 0x02, payload0, payload1, 0, 0, 0 };
-    const crc = rtcm3.crc24q(frame[0..5]);
-    frame[5] = @truncate((crc >> 16) & 0xFF);
-    frame[6] = @truncate((crc >> 8) & 0xFF);
-    frame[7] = @truncate(crc & 0xFF);
+    const payload1: u8 = @truncate(((msg_type & 0x0F) << 4) | ((ref_id >> 8) & 0x0F));
+    const payload2: u8 = @truncate(ref_id & 0xFF);
+    var frame: [9]u8 = .{ 0xD3, 0x00, 0x03, payload0, payload1, payload2, 0, 0, 0 };
+    const crc = rtcm3.crc24q(frame[0..6]);
+    frame[6] = @truncate((crc >> 16) & 0xFF);
+    frame[7] = @truncate((crc >> 8) & 0xFF);
+    frame[8] = @truncate(crc & 0xFF);
     try buf.appendSlice(alloc, &frame);
 }
 
 /// テスト用: VrsRover のフィールドをコピーするミニ初期化。stream は使わない。
 fn makeTestRover(alloc: std.mem.Allocator) VrsRover {
+    const id: u64 = 42;
     return .{
-        .id = 42,
+        .id = id,
         .stream = .{ .handle = -1 },  // 触らない (forwardFiltered は writer 側を使う)
         .peer_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
         .started_at_ms = 0,
         .alloc = alloc,
+        .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)),  // = 0x82A
     };
 }
 
-test "vrs: forwardFiltered drops Type 1005/1006/59, forwards others" {
+test "vrs: forwardFiltered drops Type 1005/1006/59, forwards + rewrites ref_id on MSM7" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     var input: std.ArrayListUnmanaged(u8) = .{};
-    // 1077 (forward) → 1005 (drop) → 1019 (forward) → 59 (drop)
-    //   → 1006 (drop) → 1087 (forward)
+    // 1077 (forward+rewrite) → 1005 (drop) → 1019 (forward, no rewrite)
+    //   → 59 (drop) → 1006 (drop) → 1087 (forward+rewrite)
     try makeDummyFrame(&input, a, 1077);
     try makeDummyFrame(&input, a, 1005);
     try makeDummyFrame(&input, a, 1019);
@@ -693,23 +755,70 @@ test "vrs: forwardFiltered drops Type 1005/1006/59, forwards others" {
 
     try testing.expectEqual(input.items.len, consumed);
     try testing.expectEqual(@as(u64, 3), rover.frames_forwarded);
+    try testing.expectEqual(@as(u64, 2), rover.frames_ref_id_rewritten);  // 1077 + 1087
     try testing.expectEqual(@as(u64, 3), rover.frames_dropped);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1005);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_1006);
     try testing.expectEqual(@as(u64, 1), rover.frames_dropped_59);
-    // 出力は 1077 + 1019 + 1087 の連結 (各 8 バイト)
-    try testing.expectEqual(@as(usize, 3 * 8), captured.items.len);
-    // 各フレーム先頭が PREAMBLE であること
-    try testing.expectEqual(@as(u8, 0xD3), captured.items[0]);
-    try testing.expectEqual(@as(u8, 0xD3), captured.items[8]);
-    try testing.expectEqual(@as(u8, 0xD3), captured.items[16]);
-    // msg_type 抽出して確認
+    // 出力は 1077 + 1019 + 1087 の連結 (各 9 バイト = 3 byte payload + 3 CRC + 3 header)
+    try testing.expectEqual(@as(usize, 3 * 9), captured.items.len);
+    // msg_type 抽出
     const mt0: u16 = (@as(u16, captured.items[3]) << 4) | (captured.items[4] >> 4);
-    const mt1: u16 = (@as(u16, captured.items[11]) << 4) | (captured.items[12] >> 4);
-    const mt2: u16 = (@as(u16, captured.items[19]) << 4) | (captured.items[20] >> 4);
+    const mt1: u16 = (@as(u16, captured.items[12]) << 4) | (captured.items[13] >> 4);
+    const mt2: u16 = (@as(u16, captured.items[21]) << 4) | (captured.items[22] >> 4);
     try testing.expectEqual(@as(u16, 1077), mt0);
     try testing.expectEqual(@as(u16, 1019), mt1);
     try testing.expectEqual(@as(u16, 1087), mt2);
+    // ref_id 抽出 (1077 frame の payload bytes 1-2)
+    const rid0: u16 = ((@as(u16, captured.items[4]) & 0x0F) << 8) | captured.items[5];
+    const rid2: u16 = ((@as(u16, captured.items[22]) & 0x0F) << 8) | captured.items[23];
+    try testing.expectEqual(rover.vrs_ref_id, rid0);  // 1077: 書き換え済
+    try testing.expectEqual(rover.vrs_ref_id, rid2);  // 1087: 書き換え済
+    // 1019 (ephemeris) は station_id 持たない → そのまま (rewrite count に入らない)
+    // CRC が再計算されて valid であることは captured 全体を parseFrame で再パースして確認
+    var pos: usize = 0;
+    var cnt: usize = 0;
+    while (pos < captured.items.len) {
+        const fr = rtcm3.parseFrame(captured.items[pos..]) orelse return error.RewriteCorruptedFrame;
+        cnt += 1;
+        pos += fr.consumed;
+    }
+    try testing.expectEqual(@as(usize, 3), cnt);  // 3 frames, 全 CRC valid
+}
+
+test "vrs: rewriteRefIdInFrame keeps msg_type, updates ref_id, refreshes CRC" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var input: std.ArrayListUnmanaged(u8) = .{};
+    try makeDummyFrame(&input, a, 1077);  // makeDummyFrame は ref_id=0 で作る
+    rewriteRefIdInFrame(input.items, 0x801);
+
+    // CRC が valid であることは parseFrame の成功で確認
+    const fr = rtcm3.parseFrame(input.items) orelse return error.ParseFailed;
+    try testing.expectEqual(@as(u16, 1077), fr.msg_type);
+    // ref_id を再抽出
+    const rid: u16 = ((@as(u16, input.items[4]) & 0x0F) << 8) | input.items[5];
+    try testing.expectEqual(@as(u16, 0x801), rid);
+}
+
+test "vrs: rtcmHasStationId classifies common types correctly" {
+    // station_id 持つ: 1001..1012, 1033, MSM 群, 1230
+    try testing.expect(rtcmHasStationId(1077));
+    try testing.expect(rtcmHasStationId(1004));
+    try testing.expect(rtcmHasStationId(1033));
+    try testing.expect(rtcmHasStationId(1230));
+    try testing.expect(rtcmHasStationId(1127));
+    // 持たない: ephemeris 群 + 不明
+    try testing.expect(!rtcmHasStationId(1019));  // GPS ephemeris
+    try testing.expect(!rtcmHasStationId(1020));  // GLO ephemeris
+    try testing.expect(!rtcmHasStationId(1042));  // BDS ephemeris
+    try testing.expect(!rtcmHasStationId(1045));  // Galileo F/NAV
+    try testing.expect(!rtcmHasStationId(1046));  // Galileo I/NAV
+    try testing.expect(!rtcmHasStationId(59));    // FKP (drop 対象)
+    try testing.expect(!rtcmHasStationId(0));
+    try testing.expect(!rtcmHasStationId(9999));
 }
 
 test "vrs: forwardFiltered drops real encoded 1005 frame" {
@@ -736,7 +845,7 @@ test "vrs: forwardFiltered stops at incomplete trailing frame" {
     const a = arena.allocator();
 
     var input: std.ArrayListUnmanaged(u8) = .{};
-    try makeDummyFrame(&input, a, 1077);  // 完全 (forward)
+    try makeDummyFrame(&input, a, 1077);  // 完全 9-byte frame (forward+rewrite)
     // 中途半端な 2 番目のフレームヘッダだけ (preamble + len_hi のみ)
     try input.appendSlice(a, &.{ 0xD3, 0x00 });
 
@@ -745,7 +854,7 @@ test "vrs: forwardFiltered stops at incomplete trailing frame" {
     var rover = makeTestRover(a);
 
     const consumed = try forwardFiltered(writer, input.items, &rover);
-    try testing.expectEqual(@as(usize, 8), consumed);
+    try testing.expectEqual(@as(usize, 9), consumed);
     try testing.expectEqual(@as(u64, 1), rover.frames_forwarded);
 }
 
