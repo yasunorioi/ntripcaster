@@ -236,13 +236,29 @@ km scale) が残ったまま。これを 3 局の lat/lon 差 (~0.001 rad) の i
 改善のためには別途 `engine.zig::computeFkp` の改修 (Phase 6 候補) で
 geometric range removal を入れる必要あり。
 
-**未着手 (Phase 6 候補)**:
-- ⚠️ `engine.zig::computeFkp` の改修。各 PhaseObs に対応する衛星 ECEF
-  位置を ephemeris (1019/1020/1042/1045/1046) から取得して、各局-衛星
-  geometric range を引いた residual で LIF/LGF を計算する。これで FKP
-  値が atmospheric scale (mm-cm) に収まり、rover の RTK fix 品質が
-  実際に向上する。スコープ大きい (ephemeris parse + 衛星 ECEF 計算 +
-  時刻同期 + dual-frequency 整合) ので Phase 6 として別枠で着手する。
+**Phase 6 設計メモ作成 (`docs/phase6-design.md`)**:
+- 課題の真因解析 (LIF が geometry を残したまま computeFkp に流れている
+  Tanaka 2003 §4.3.2 の前提抜け) を整理。
+- 修正アプローチを 3 案比較 + 段階導入 (6a/6b/Phase 7) を提案:
+  - **6a (案 C)**: 閾値判定 (≈100 m/rad) で異常 FKP を棄却。2-3h で
+    補正値暴走防止できる safety net。即着手推奨。
+  - **6b (案 B)**: MSM7 内蔵 rough_range を近似 geometric range として
+    引いた residual + double-difference + 簡易 ambiguity (初回 epoch
+    fix)。~13h、10cm 級精度。本筋の改修。
+  - **Phase 7 (案 A)**: フル ephemeris (1019/1020/1042/1045/1046) 解析 +
+    衛星 ECEF + DD + LAMBDA で cm 級。~3 週間、将来オプション。
+- 1019 (GPS Eph) の bit レイアウト表を参考に同梱。1020/1042/1045/1046 は
+  RTCM 10403.3 参照ポインタのみ。
+- 6b の SatObs 拡張 / DD 形成 / cycle slip 検出 (DF407 lock_time) の
+  設計を具体化。次セッションで確認する事項 (閾値妥当性、rough_range の
+  連続性、lock_time の取り出し) を 3 点リストで明記。
+
+**未着手 (Phase 6 本実装)**:
+- ⚠️ Phase 6a (computeFkp 閾値判定 + 棄却) を即着手。これで配線済みの
+  Phase 5b-3 を破壊しない safety net が入る。
+- ⚠️ Phase 6b (rough_range residual + DD) を別ブランチ
+  (`phase6-fkp-residual` 等) で着手予定。`phase4-vrs` を master に
+  マージしてから派生させる。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
