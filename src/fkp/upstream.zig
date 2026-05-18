@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const msm7 = @import("msm7.zig");
+const ephemeris = @import("ephemeris.zig");
 const rtcm3 = @import("../ntrip/rtcm3.zig");
 const log_mod = @import("../log.zig");
 
@@ -68,6 +69,10 @@ pub const Upstream = struct {
     /// (prn, band) → 最新観測。新着で上書き、古いエントリは snapshot 時に除外。
     /// ArrayList ではなく Map にすることで「station A のみ更新が遅い」レースを回避。
     phase_map: std.AutoHashMapUnmanaged(u16, ObsEntry),
+    /// Phase 7-1: GPS Type 1019 から取り出した broadcast ephemeris の保管。
+    /// 各上流からの最新 eph を PRN 別に保持。Phase 7-2 以降で衛星 ECEF 計算に使う。
+    /// `lock` で保護 (phase_map と共有)。
+    eph_store: ephemeris.EphemerisStore,
 
     /// snapshot に含める観測値の age 上限 [ms]。これより古いエントリは「死んでる」扱い。
     /// 通常 MSM7 は 1 秒間隔で来るので、10 秒もあれば過剰に余裕。
@@ -104,6 +109,7 @@ pub const Upstream = struct {
             .lock = .{},
             .coord = null,
             .phase_map = .{},
+            .eph_store = ephemeris.EphemerisStore.init(alloc),
             .max_obs_age_ms = 10 * std.time.ms_per_s,
             .active = std.atomic.Value(bool).init(true),
             .last_data_at_ms = std.time.milliTimestamp(),
@@ -117,6 +123,7 @@ pub const Upstream = struct {
     pub fn destroy(self: *Upstream) void {
         self.lock.lock();
         self.phase_map.deinit(self.alloc);
+        self.eph_store.deinit();
         self.lock.unlock();
         self.alloc.free(self.cfg.host);
         self.alloc.free(self.cfg.mount);
@@ -488,6 +495,14 @@ fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
                     .ts_ms = now,
                 }) catch return;
             }
+        },
+        1019 => {
+            // GPS broadcast ephemeris (Phase 7-1)。同一 PRN は常に上書き。
+            const eph = ephemeris.parseMsg1019(payload) orelse return;
+            const now = std.time.milliTimestamp();
+            self.lock.lock();
+            defer self.lock.unlock();
+            self.eph_store.upsertGps(eph, now) catch return;
         },
         else => {},
     }

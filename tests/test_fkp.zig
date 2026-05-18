@@ -8,6 +8,7 @@ const fkp_engine = ntripcaster.fkp.engine;
 const fkp_type59 = ntripcaster.fkp.type59;
 const fkp_runtime = ntripcaster.fkp.runtime;
 const fkp_vrs = ntripcaster.fkp.vrs;
+const fkp_eph = ntripcaster.fkp.ephemeris;
 
 // ── BitReader / BitWriter ─────────────────────────────────────────────────────
 
@@ -951,4 +952,303 @@ test "fkp: extractPhase partial cell_mask preserves bit offset" {
             1e-4,
         );
     }
+}
+
+// ── Phase 7-1: GPS broadcast ephemeris (Type 1019) ────────────────────────
+
+/// Type 1019 ペイロード (61 byte = 488 bit) を組み立てるヘルパー。
+/// 全 raw scaled int を呼び出し側が与え、bit 配置は spec (RTCM 10403.3
+/// § 3.5.13) 通りに書く。
+fn buildMsg1019Payload(
+    buf: *[61]u8,
+    fields: struct {
+        prn: u8,
+        week_mod1024: u16,
+        sv_acc: u4,
+        code_on_l2: u2,
+        idot_raw: i64,
+        iode: u8,
+        toc_raw: u64,
+        af2_raw: i64,
+        af1_raw: i64,
+        af0_raw: i64,
+        iodc: u16,
+        crs_raw: i64,
+        dn_raw: i64,
+        m0_raw: i64,
+        cuc_raw: i64,
+        ecc_raw: u64,
+        cus_raw: i64,
+        sqrt_a_raw: u64,
+        toe_raw: u64,
+        cic_raw: i64,
+        omega0_raw: i64,
+        cis_raw: i64,
+        inc_raw: i64,
+        crc_raw: i64,
+        argp_raw: i64,
+        omdot_raw: i64,
+        tgd_raw: i64,
+        sv_health: u6,
+        l2p_flag: u1,
+        fit_interval_flag: u1,
+    },
+) void {
+    @memset(buf, 0);
+    var bw = fkp_bits.BitWriter.init(buf);
+    bw.writeU(12, 1019);
+    bw.writeU(6, fields.prn);
+    bw.writeU(10, fields.week_mod1024);
+    bw.writeU(4, fields.sv_acc);
+    bw.writeU(2, fields.code_on_l2);
+    bw.writeS(14, fields.idot_raw);
+    bw.writeU(8, fields.iode);
+    bw.writeU(16, fields.toc_raw);
+    bw.writeS(8, fields.af2_raw);
+    bw.writeS(16, fields.af1_raw);
+    bw.writeS(22, fields.af0_raw);
+    bw.writeU(10, fields.iodc);
+    bw.writeS(16, fields.crs_raw);
+    bw.writeS(16, fields.dn_raw);
+    bw.writeS(32, fields.m0_raw);
+    bw.writeS(16, fields.cuc_raw);
+    bw.writeU(32, fields.ecc_raw);
+    bw.writeS(16, fields.cus_raw);
+    bw.writeU(32, fields.sqrt_a_raw);
+    bw.writeU(16, fields.toe_raw);
+    bw.writeS(16, fields.cic_raw);
+    bw.writeS(32, fields.omega0_raw);
+    bw.writeS(16, fields.cis_raw);
+    bw.writeS(32, fields.inc_raw);
+    bw.writeS(16, fields.crc_raw);
+    bw.writeS(32, fields.argp_raw);
+    bw.writeS(24, fields.omdot_raw);
+    bw.writeS(8, fields.tgd_raw);
+    bw.writeU(6, fields.sv_health);
+    bw.writeU(1, fields.l2p_flag);
+    bw.writeU(1, fields.fit_interval_flag);
+}
+
+test "fkp: parseMsg1019 decodes all fields with correct SI scaling" {
+    // 全 field に distinct な raw 値を入れて、scale を素直に掛けたものが
+    // パース結果と一致することを確認 (符号 + scale)。
+    var buf: [61]u8 = undefined;
+    buildMsg1019Payload(&buf, .{
+        .prn = 13,
+        .week_mod1024 = 1023,
+        .sv_acc = 0,
+        .code_on_l2 = 1,
+        .idot_raw = -3000,
+        .iode = 99,
+        .toc_raw = 12345,
+        .af2_raw = 5,
+        .af1_raw = -7,
+        .af0_raw = 1000000,
+        .iodc = 250,
+        .crs_raw = 320, // 320 × 2^-5 = 10.0 m
+        .dn_raw = 4000,
+        .m0_raw = 100000000,
+        .cuc_raw = -500,
+        .ecc_raw = 1717986918, // ≒ 0.2
+        .cus_raw = 500,
+        .sqrt_a_raw = 2702924288, // ≒ 5153.6 √m (近似)
+        .toe_raw = 7200,
+        .cic_raw = -200,
+        .omega0_raw = -200000000,
+        .cis_raw = 200,
+        .inc_raw = 500000000,
+        .crc_raw = -640, // -640 × 2^-5 = -20.0 m
+        .argp_raw = 300000000,
+        .omdot_raw = -8000,
+        .tgd_raw = -10,
+        .sv_health = 0,
+        .l2p_flag = 1,
+        .fit_interval_flag = 0,
+    });
+
+    const eph = fkp_eph.parseMsg1019(&buf) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    const pi = std.math.pi;
+    const pow2_m29 = 1.0 / 536870912.0;
+    const pow2_m31 = 1.0 / 2147483648.0;
+    const pow2_m33 = 1.0 / 8589934592.0;
+    const pow2_m43 = 1.0 / 8796093022208.0;
+    const pow2_m55 = 1.0 / 36028797018963968.0;
+    const pow2_m19 = 1.0 / 524288.0;
+
+    try std.testing.expectEqual(@as(u8, 13), eph.prn);
+    try std.testing.expectEqual(@as(u16, 1023), eph.week_mod1024);
+    try std.testing.expectEqual(@as(u4, 0), eph.sv_acc);
+    try std.testing.expectEqual(@as(u2, 1), eph.code_on_l2);
+    try std.testing.expectEqual(@as(u8, 99), eph.iode);
+    try std.testing.expectEqual(@as(u10, 250), eph.iodc);
+    try std.testing.expectEqual(@as(u6, 0), eph.sv_health);
+    try std.testing.expectEqual(@as(u1, 1), eph.l2p_flag);
+    try std.testing.expectEqual(@as(u1, 0), eph.fit_interval_flag);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 12345.0 * 16.0), eph.toc_s, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 7200.0 * 16.0), eph.toe_s, 1e-9);
+
+    try std.testing.expectApproxEqAbs(1000000.0 * pow2_m31, eph.af0_s, 1e-15);
+    try std.testing.expectApproxEqAbs(-7.0 * pow2_m43, eph.af1_s_per_s, 1e-20);
+    try std.testing.expectApproxEqAbs(5.0 * pow2_m55, eph.af2_s_per_s2, 1e-25);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), eph.crs_m, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -20.0), eph.crc_m, 1e-9);
+
+    try std.testing.expectApproxEqAbs(-500.0 * pow2_m29, eph.cuc_rad, 1e-15);
+    try std.testing.expectApproxEqAbs(500.0 * pow2_m29, eph.cus_rad, 1e-15);
+    try std.testing.expectApproxEqAbs(-200.0 * pow2_m29, eph.cic_rad, 1e-15);
+    try std.testing.expectApproxEqAbs(200.0 * pow2_m29, eph.cis_rad, 1e-15);
+
+    try std.testing.expectApproxEqAbs(4000.0 * pow2_m43 * pi, eph.dn_rad_per_s, 1e-22);
+    try std.testing.expectApproxEqAbs(100000000.0 * pow2_m31 * pi, eph.m0_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(-200000000.0 * pow2_m31 * pi, eph.omega0_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(500000000.0 * pow2_m31 * pi, eph.i0_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(300000000.0 * pow2_m31 * pi, eph.argp_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(-3000.0 * pow2_m43 * pi, eph.idot_rad_per_s, 1e-22);
+    try std.testing.expectApproxEqAbs(-8000.0 * pow2_m43 * pi, eph.omdot_rad_per_s, 1e-22);
+
+    try std.testing.expectApproxEqAbs(1717986918.0 * pow2_m33, eph.ecc, 1e-15);
+    try std.testing.expectApproxEqAbs(2702924288.0 * pow2_m19, eph.sqrt_a_m, 1e-10);
+
+    try std.testing.expectApproxEqAbs(-10.0 * pow2_m31, eph.tgd_s, 1e-15);
+}
+
+test "fkp: parseMsg1019 rejects payload that is too short" {
+    const short = [_]u8{0} ** 30;
+    try std.testing.expectEqual(@as(?fkp_eph.GpsEphemeris, null), fkp_eph.parseMsg1019(&short));
+}
+
+test "fkp: parseMsg1019 rejects non-1019 message types" {
+    var buf: [61]u8 = undefined;
+    @memset(&buf, 0);
+    var bw = fkp_bits.BitWriter.init(&buf);
+    bw.writeU(12, 1077); // MSM7、1019 ではない
+    try std.testing.expectEqual(@as(?fkp_eph.GpsEphemeris, null), fkp_eph.parseMsg1019(&buf));
+}
+
+test "fkp: EphemerisStore upsert + lookup roundtrip" {
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const eph1 = fkp_eph.GpsEphemeris{
+        .prn = 5,
+        .week_mod1024 = 100,
+        .sv_acc = 0,
+        .code_on_l2 = 0,
+        .iode = 10,
+        .iodc = 10,
+        .sv_health = 0,
+        .l2p_flag = 0,
+        .fit_interval_flag = 0,
+        .toc_s = 0,
+        .toe_s = 0,
+        .af0_s = 0,
+        .af1_s_per_s = 0,
+        .af2_s_per_s2 = 0,
+        .crs_m = 0,
+        .crc_m = 0,
+        .cuc_rad = 0,
+        .cus_rad = 0,
+        .cic_rad = 0,
+        .cis_rad = 0,
+        .dn_rad_per_s = 0,
+        .m0_rad = 0,
+        .ecc = 0,
+        .sqrt_a_m = 5153.6,
+        .omega0_rad = 0,
+        .omdot_rad_per_s = 0,
+        .i0_rad = 0,
+        .idot_rad_per_s = 0,
+        .argp_rad = 0,
+        .tgd_s = 0,
+    };
+
+    try store.upsertGps(eph1, 1000);
+    try std.testing.expectEqual(@as(usize, 1), store.countGps());
+
+    const got1 = store.lookupGps(5) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expectEqual(@as(u8, 10), got1.eph.iode);
+    try std.testing.expectEqual(@as(i64, 1000), got1.received_at_ms);
+    try std.testing.expectApproxEqAbs(@as(f64, 5153.6), got1.eph.sqrt_a_m, 1e-9);
+
+    // 同一 PRN、IODE 更新で上書き
+    var eph2 = eph1;
+    eph2.iode = 20;
+    try store.upsertGps(eph2, 2000);
+    try std.testing.expectEqual(@as(usize, 1), store.countGps());
+    try std.testing.expectEqual(@as(u8, 20), store.lookupGps(5).?.eph.iode);
+    try std.testing.expectEqual(@as(i64, 2000), store.lookupGps(5).?.received_at_ms);
+
+    // 別 PRN は別エントリ
+    var eph3 = eph1;
+    eph3.prn = 7;
+    try store.upsertGps(eph3, 3000);
+    try std.testing.expectEqual(@as(usize, 2), store.countGps());
+    try std.testing.expectEqual(@as(?fkp_eph.EphemerisStore.Entry, null), store.lookupGps(99));
+}
+
+test "fkp: parseMsg1019 + EphemerisStore integration" {
+    // bit pattern を組んで parse → store に upsert → lookup で fields 再確認
+    var buf: [61]u8 = undefined;
+    buildMsg1019Payload(&buf, .{
+        .prn = 7,
+        .week_mod1024 = 500,
+        .sv_acc = 1,
+        .code_on_l2 = 1,
+        .idot_raw = 100,
+        .iode = 42,
+        .toc_raw = 6300,
+        .af2_raw = 0,
+        .af1_raw = 1,
+        .af0_raw = -50,
+        .iodc = 42,
+        .crs_raw = 64,
+        .dn_raw = 100,
+        .m0_raw = 100000,
+        .cuc_raw = 0,
+        .ecc_raw = 0,
+        .cus_raw = 0,
+        .sqrt_a_raw = 2702924288,
+        .toe_raw = 6300,
+        .cic_raw = 0,
+        .omega0_raw = 0,
+        .cis_raw = 0,
+        .inc_raw = 0,
+        .crc_raw = 0,
+        .argp_raw = 0,
+        .omdot_raw = 0,
+        .tgd_raw = 0,
+        .sv_health = 0,
+        .l2p_flag = 0,
+        .fit_interval_flag = 0,
+    });
+
+    const eph = fkp_eph.parseMsg1019(&buf) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+    try store.upsertGps(eph, 12345);
+
+    const got = store.lookupGps(7) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expectEqual(@as(u8, 7), got.eph.prn);
+    try std.testing.expectEqual(@as(u8, 42), got.eph.iode);
+    try std.testing.expectEqual(@as(u10, 42), got.eph.iodc);
+    try std.testing.expectEqual(@as(u16, 500), got.eph.week_mod1024);
+    // toc/toe = 6300 × 16 = 100800 s
+    try std.testing.expectApproxEqAbs(@as(f64, 100800.0), got.eph.toc_s, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 100800.0), got.eph.toe_s, 1e-9);
 }
