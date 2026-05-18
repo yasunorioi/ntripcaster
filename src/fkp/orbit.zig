@@ -153,6 +153,12 @@ pub const GeometricRange = struct {
     tau_s: f64,
     /// geometric range [m] (typical: 20000 - 26000 km)
     rho_m: f64,
+    /// 光行差収束後の偏心近点角 E [rad]。`satClockBiasGps` の相対論項で
+    /// 再利用するため同伴。
+    ecc_anomaly_rad: f64,
+    /// signal emission 時刻 (= t_recv_sow − tau_s) [GPS sow]。
+    /// sat clock bias 計算で受信時刻ではなく emission 時刻を使う必要がある。
+    t_emit_sow: f64,
 };
 
 /// 受信時刻 `t_recv_sow` (GPS sow) と station ECEF から、衛星 emission 時の
@@ -172,11 +178,14 @@ pub fn geometricRangeGps(
     var sat_x: f64 = 0;
     var sat_y: f64 = 0;
     var sat_z: f64 = 0;
+    var ecc_anomaly: f64 = 0;
+    var t_emit: f64 = 0;
 
     var i: usize = 0;
     while (i < 8) : (i += 1) {
-        const t_emit = t_recv_sow - tau;
+        t_emit = t_recv_sow - tau;
         const sat = gpsSatEcef(eph, t_emit);
+        ecc_anomaly = sat.eccentric_anomaly_rad;
 
         // Earth rotation correction: rotate sat ECEF by Ωe·τ around z
         const theta = OMEGA_EARTH * tau;
@@ -207,5 +216,7 @@ pub fn geometricRangeGps(
         .sat_ecef_corrected = .{ sat_x, sat_y, sat_z },
         .tau_s = tau,
         .rho_m = rho,
+        .ecc_anomaly_rad = ecc_anomaly,
+        .t_emit_sow = t_emit,
     };
 }

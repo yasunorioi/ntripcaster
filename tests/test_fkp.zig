@@ -1432,3 +1432,306 @@ test "fkp.orbit: geometricRangeGps applies Earth rotation correction" {
     try std.testing.expect(drift > 10.0);
     try std.testing.expect(drift < 1000.0);
 }
+
+// ── Phase 7-3: extractPhase の lock_time/CNR ───────────────────────────────
+
+test "fkp: extractPhase exposes lock_time_indicator and cnr_db_hz" {
+    // 各 cell に distinct な lock_time / CNR raw を書き込み、PhaseObs に
+    // 正しく入ることを確認。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var payload = [_]u8{0} ** 96;
+    var bw = fkp_bits.BitWriter.init(&payload);
+    writeMsm7TestHeader(&bw);
+    for (0..6) |_| bw.writeU(1, 1); // cell_mask all valid
+
+    // sat data: PRN1/2/3 で同じ rough_int + 異なる rough_mod
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 512);
+    bw.writeS(14, 0);
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 256);
+    bw.writeS(14, 0);
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 128);
+    bw.writeS(14, 0);
+
+    // signal data: 6 cell × 80 bit。lock_time / CNR は cell ごとに変える。
+    // raw lock_time = 10, 20, 30, 40, 50, 60
+    // raw CNR     = 640, 720, 560, 800, 480, 880  (× 0.0625 dB-Hz = 40, 45, 35, 50, 30, 55)
+    const cells = [_]struct { lt: u32, cnr: u32 }{
+        .{ .lt = 10, .cnr = 640 },
+        .{ .lt = 20, .cnr = 720 },
+        .{ .lt = 30, .cnr = 560 },
+        .{ .lt = 40, .cnr = 800 },
+        .{ .lt = 50, .cnr = 480 },
+        .{ .lt = 60, .cnr = 880 },
+    };
+    for (cells) |c| {
+        bw.writeS(20, 0); // fine_pseudo
+        bw.writeS(24, 1000); // fine_phase
+        bw.writeU(10, c.lt); // lock_time
+        bw.writeU(1, 0); // half-cycle
+        bw.writeU(10, c.cnr); // CNR
+        bw.writeS(15, 0); // fine phase rate
+    }
+
+    const obs = try fkp_msm7.extractPhase(alloc, &payload);
+    try std.testing.expectEqual(@as(usize, 6), obs.len);
+
+    // (si, gi) iteration order: (0,0) (0,1) (1,0) (1,1) (2,0) (2,1)
+    const expected_lt = [_]u16{ 10, 20, 30, 40, 50, 60 };
+    const expected_cnr_db = [_]f64{ 40.0, 45.0, 35.0, 50.0, 30.0, 55.0 };
+    for (obs, 0..) |o, i| {
+        try std.testing.expectEqual(expected_lt[i], o.lock_time_indicator);
+        try std.testing.expectApproxEqAbs(expected_cnr_db[i], o.cnr_db_hz, 1e-9);
+    }
+}
+
+// ── Phase 7-3: pickReferencePrn ────────────────────────────────────────────
+
+/// テスト用に PRN, L1/L2, CNR を指定して SatObsEx を作る。
+fn mkSatObsEx(prn: u8, l1: f64, l2: f64, cnr: f64) fkp_engine.SatObsEx {
+    return .{
+        .prn = prn,
+        .l1_m = l1,
+        .l2_m = l2,
+        .l1_cnr_db_hz = cnr,
+        .l2_cnr_db_hz = cnr,
+        .l1_lock_time = 100,
+        .l2_lock_time = 100,
+    };
+}
+
+/// テスト用に最低限の station coord (ECEF + lat/lon は dummy) を作る。
+fn mkStaCoord(id: u16, x: f64, y: f64, z: f64) fkp_msm7.StationCoord {
+    const ll = fkp_msm7.ecefToLatLon(x, y, z);
+    return .{
+        .ref_station_id = id,
+        .x = x,
+        .y = y,
+        .z = z,
+        .lat = ll[0],
+        .lon = ll[1],
+    };
+}
+
+test "fkp.engine: pickReferencePrn picks highest average CNR with eph available" {
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    // PRN 5 と 10 を eph に登録
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    try store.upsertGps(eph_5, 0);
+    var eph_10 = zeroGpsEph();
+    eph_10.prn = 10;
+    try store.upsertGps(eph_10, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 45.0), // 高 CNR
+    };
+    const obs_b = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 45.0),
+    };
+    const obs_c = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 45.0),
+    };
+
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, 4.0e6, 0.0, 4.5e6), .ecef = .{ 4.0e6, 0.0, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, 4.0e6, 1.0e5, 4.5e6), .ecef = .{ 4.0e6, 1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, 4.0e6, -1.0e5, 4.5e6), .ecef = .{ 4.0e6, -1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_c },
+    };
+
+    const ref = fkp_engine.pickReferencePrn(&stations, &store);
+    try std.testing.expectEqual(@as(?u8, 10), ref);
+}
+
+test "fkp.engine: pickReferencePrn skips PRN without ephemeris" {
+    // PRN 5 だけ eph 登録 → CNR が低くても 5 が選ばれる
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    try store.upsertGps(eph_5, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 50.0), // 高 CNR だが eph 無 → skip
+    };
+    const obs_b = obs_a;
+    const obs_c = obs_a;
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, 4.0e6, 0.0, 4.5e6), .ecef = .{ 4.0e6, 0.0, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, 4.0e6, 1.0e5, 4.5e6), .ecef = .{ 4.0e6, 1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, 4.0e6, -1.0e5, 4.5e6), .ecef = .{ 4.0e6, -1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_c },
+    };
+
+    const ref = fkp_engine.pickReferencePrn(&stations, &store);
+    try std.testing.expectEqual(@as(?u8, 5), ref);
+}
+
+test "fkp.engine: pickReferencePrn returns null when no common visible PRN" {
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    try store.upsertGps(eph_5, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{mkSatObsEx(5, 1e6, 1e6, 40.0)};
+    const obs_b = [_]fkp_engine.SatObsEx{}; // B には PRN 5 が無い
+    const obs_c = [_]fkp_engine.SatObsEx{mkSatObsEx(5, 1e6, 1e6, 40.0)};
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, 4.0e6, 0.0, 4.5e6), .ecef = .{ 4.0e6, 0.0, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, 4.0e6, 1.0e5, 4.5e6), .ecef = .{ 4.0e6, 1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, 4.0e6, -1.0e5, 4.5e6), .ecef = .{ 4.0e6, -1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_c },
+    };
+    const ref = fkp_engine.pickReferencePrn(&stations, &store);
+    try std.testing.expectEqual(@as(?u8, null), ref);
+}
+
+// ── Phase 7-3: computeFkpDd ────────────────────────────────────────────────
+
+/// 「観測値 L = ρ + c·dt + delta_m」で SatObsEx の l1_m/l2_m を構築するヘルパー。
+/// `delta_m` を 0 にすれば SD residual も 0 になり、DD = 0、FKP = 0 が期待値。
+fn synthPhase(
+    eph: fkp_eph.GpsEphemeris,
+    t_recv_sow: f64,
+    sta_ecef: [3]f64,
+    delta_m: f64,
+) f64 {
+    const gr = fkp_orbit.geometricRangeGps(eph, t_recv_sow, sta_ecef);
+    const dt = fkp_orbit.satClockBiasGps(eph, gr.t_emit_sow, gr.ecc_anomaly_rad, true);
+    return gr.rho_m + fkp_orbit.C_LIGHT * dt + delta_m;
+}
+
+test "fkp.engine: computeFkpDd returns ~zero FkpParam when SD residuals are all zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    // 2 PRN を eph に登録 (5 = ref、10 = non-ref)
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    eph_5.sqrt_a_m = 5153.6;
+    eph_5.m0_rad = 0.5;
+    try store.upsertGps(eph_5, 0);
+
+    var eph_10 = zeroGpsEph();
+    eph_10.prn = 10;
+    eph_10.sqrt_a_m = 5153.6;
+    eph_10.m0_rad = 1.2;
+    try store.upsertGps(eph_10, 0);
+
+    // 3 局: 受信機を WGS-84 楕円体上の妥当な位置に置く
+    const ecef_a: [3]f64 = .{ 4.0e6, 0.0, 4.7e6 };
+    const ecef_b: [3]f64 = .{ 4.0e6, 1.0e5, 4.7e6 };
+    const ecef_c: [3]f64 = .{ 4.0e6, -1.0e5, 4.7e6 };
+    const t: f64 = 100.0;
+
+    // delta=0 で全観測値を合成
+    const l1_5_a = synthPhase(eph_5, t, ecef_a, 0);
+    const l1_5_b = synthPhase(eph_5, t, ecef_b, 0);
+    const l1_5_c = synthPhase(eph_5, t, ecef_c, 0);
+    const l1_10_a = synthPhase(eph_10, t, ecef_a, 0);
+    const l1_10_b = synthPhase(eph_10, t, ecef_b, 0);
+    const l1_10_c = synthPhase(eph_10, t, ecef_c, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, l1_5_a, l1_5_a, 40.0),
+        mkSatObsEx(10, l1_10_a, l1_10_a, 35.0),
+    };
+    const obs_b = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, l1_5_b, l1_5_b, 40.0),
+        mkSatObsEx(10, l1_10_b, l1_10_b, 35.0),
+    };
+    const obs_c = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, l1_5_c, l1_5_c, 40.0),
+        mkSatObsEx(10, l1_10_c, l1_10_c, 35.0),
+    };
+
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, ecef_a[0], ecef_a[1], ecef_a[2]), .ecef = ecef_a, .t_recv_sow = t, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, ecef_b[0], ecef_b[1], ecef_b[2]), .ecef = ecef_b, .t_recv_sow = t, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, ecef_c[0], ecef_c[1], ecef_c[2]), .ecef = ecef_c, .t_recv_sow = t, .obs = &obs_c },
+    };
+
+    // ref_prn=5 を明示、PRN 10 だけ FkpParam が出る (≈ 0)
+    const fkp = try fkp_engine.computeFkpDd(alloc, &stations, &store, 5, .{
+        .max_magnitude = 1.0, // 1 m/rad 以下を期待
+    });
+    try std.testing.expectEqual(@as(usize, 1), fkp.len);
+    try std.testing.expectEqual(@as(u8, 10), fkp[0].prn);
+    // SD residual が numeric noise (~1e-7 m) なので FKP も小さい値
+    try std.testing.expect(@abs(fkp[0].n_0) < 1e-3);
+    try std.testing.expect(@abs(fkp[0].e_0) < 1e-3);
+    try std.testing.expect(@abs(fkp[0].n_i) < 1e-3);
+    try std.testing.expect(@abs(fkp[0].e_i) < 1e-3);
+}
+
+test "fkp.engine: computeFkpDd skips ref PRN (DD = 0 by construction)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    eph_5.sqrt_a_m = 5153.6;
+    try store.upsertGps(eph_5, 0);
+
+    const ecef_a: [3]f64 = .{ 4.0e6, 0.0, 4.7e6 };
+    const ecef_b: [3]f64 = .{ 4.0e6, 1.0e5, 4.7e6 };
+    const ecef_c: [3]f64 = .{ 4.0e6, -1.0e5, 4.7e6 };
+    const t: f64 = 100.0;
+    const l1_a = synthPhase(eph_5, t, ecef_a, 0);
+    const l1_b = synthPhase(eph_5, t, ecef_b, 0);
+    const l1_c = synthPhase(eph_5, t, ecef_c, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{mkSatObsEx(5, l1_a, l1_a, 40.0)};
+    const obs_b = [_]fkp_engine.SatObsEx{mkSatObsEx(5, l1_b, l1_b, 40.0)};
+    const obs_c = [_]fkp_engine.SatObsEx{mkSatObsEx(5, l1_c, l1_c, 40.0)};
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, ecef_a[0], ecef_a[1], ecef_a[2]), .ecef = ecef_a, .t_recv_sow = t, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, ecef_b[0], ecef_b[1], ecef_b[2]), .ecef = ecef_b, .t_recv_sow = t, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, ecef_c[0], ecef_c[1], ecef_c[2]), .ecef = ecef_c, .t_recv_sow = t, .obs = &obs_c },
+    };
+
+    // ref=5、non-ref が無い → 空のリスト
+    const fkp = try fkp_engine.computeFkpDd(alloc, &stations, &store, 5, .{});
+    try std.testing.expectEqual(@as(usize, 0), fkp.len);
+}
+
+test "fkp.engine: groupPhaseObsEx propagates cnr + lock_time per band" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const phase_list = [_]fkp_msm7.PhaseObs{
+        .{ .prn = 5, .phase_m = 21000000.5, .freq_hz = 1575.42e6, .band = .l1, .lock_time_indicator = 100, .cnr_db_hz = 45.0 },
+        .{ .prn = 5, .phase_m = 16700000.2, .freq_hz = 1227.60e6, .band = .l2, .lock_time_indicator = 90, .cnr_db_hz = 38.5 },
+    };
+    const sat_obs = try fkp_engine.groupPhaseObsEx(alloc, &phase_list);
+    try std.testing.expectEqual(@as(usize, 1), sat_obs.len);
+    try std.testing.expectEqual(@as(u8, 5), sat_obs[0].prn);
+    try std.testing.expectApproxEqAbs(@as(f64, 21000000.5), sat_obs[0].l1_m.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 16700000.2), sat_obs[0].l2_m.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 45.0), sat_obs[0].l1_cnr_db_hz.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 38.5), sat_obs[0].l2_cnr_db_hz.?, 1e-9);
+    try std.testing.expectEqual(@as(u16, 100), sat_obs[0].l1_lock_time.?);
+    try std.testing.expectEqual(@as(u16, 90), sat_obs[0].l2_lock_time.?);
+}

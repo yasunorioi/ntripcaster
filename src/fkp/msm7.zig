@@ -62,6 +62,14 @@ pub const PhaseObs = struct {
     freq_hz: f64,
     /// バンド (L1/L2/L5)
     band: Band,
+    /// MSM7 DF407 lock time indicator (10 bit raw)。連続トラッキング時間の
+    /// エンコード値 (range 0..1023)。前 epoch より減少していれば cycle slip
+    /// (Phase 7-4 のアンビギュイティ再 fix で使う)。
+    lock_time_indicator: u16,
+    /// MSM7 DF408 CNR (Carrier-to-Noise ratio) [dB-Hz]。
+    /// raw 10 bit × 0.0625 で dB-Hz 単位。typical 30-50 dB-Hz。
+    /// reference PRN 選定 (高 CNR ほど良い受信品質) で使う。
+    cnr_db_hz: f64,
 };
 
 /// MSM7 共通ヘッダー
@@ -211,9 +219,9 @@ pub fn extractPhase(
             const fine_pseudo = br.readS(20);
             _ = fine_pseudo;
             const fine_phase = br.readS(24);
-            br.skip(10); // lock time indicator
+            const lock_time_indicator: u16 = @truncate(br.readU(10));
             br.skip(1); // half-cycle ambiguity
-            br.skip(10); // CNR
+            const cnr_raw: u32 = @truncate(br.readU(10));
             br.skip(15); // fine phase range rate
 
             if (rough_int[si] == 255) continue; // RTCM3 invalid sentinel
@@ -238,6 +246,8 @@ pub fn extractPhase(
                 .phase_m = phase_m,
                 .freq_hz = freq,
                 .band = band,
+                .lock_time_indicator = lock_time_indicator,
+                .cnr_db_hz = @as(f64, @floatFromInt(cnr_raw)) * 0.0625,
             });
         }
     }
