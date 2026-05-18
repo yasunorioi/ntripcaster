@@ -143,9 +143,9 @@ test "fkp: computeFkp 3-station synthetic data" {
     // 合成観測値（PRN 5 のみ）。1.0 m / 0.8 m の delta は物理妥当範囲を
     // 超えるので Phase 6a の閾値判定は無効化 (max_magnitude=inf) する。
     // 「math が finite な出力を出すこと」だけ確認する古典 sanity test。
-    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6, .l2_m = 20e6 * (1227.60 / 1575.42), .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6 + 1.0, .l2_m = 20e6 * (1227.60 / 1575.42) + 0.8, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6 - 0.5, .l2_m = 20e6 * (1227.60 / 1575.42) - 0.4, .rough_l1_m = 0, .rough_l2_m = 0 }};
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6, .l2_m = 20e6 * (1227.60 / 1575.42) }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6 + 1.0, .l2_m = 20e6 * (1227.60 / 1575.42) + 0.8 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20e6 - 0.5, .l2_m = 20e6 * (1227.60 / 1575.42) - 0.4 }};
 
     const stations = [_]fkp_engine.StationObs{
         .{ .coord = coord_a, .obs = &obs_a },
@@ -177,10 +177,9 @@ test "fkp: computeFkp drops PRN with excess magnitude (default threshold)" {
     const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
 
     // 大きな phase 差 (m スケール) で n_0 が 1000+ m/rad に膨らむ入力
-    // (rough=0 で residual=phase、Phase 6b 以前と同等の挙動を確認)
-    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 1.0, .l2_m = 0.8, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = -0.5, .l2_m = -0.4, .rough_l1_m = 0, .rough_l2_m = 0 }};
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 1.0, .l2_m = 0.8 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = -0.5, .l2_m = -0.4 }};
 
     const stations = [_]fkp_engine.StationObs{
         .{ .coord = coord_a, .obs = &obs_a },
@@ -206,9 +205,9 @@ test "fkp: computeFkp keeps PRN with sane magnitude (default threshold)" {
     const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
 
     // 物理妥当な ~mm スケール差 (10mm/100km × 100km 級基線)
-    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.005, .l2_m = 0.004, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.007, .l2_m = 0.0055, .rough_l1_m = 0, .rough_l2_m = 0 }};
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.005, .l2_m = 0.004 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.007, .l2_m = 0.0055 }};
 
     const stations = [_]fkp_engine.StationObs{
         .{ .coord = coord_a, .obs = &obs_a },
@@ -236,9 +235,9 @@ test "fkp: computeFkp custom max_magnitude threshold" {
     const coord_a = fkp_msm7.StationCoord{ .ref_station_id = 1, .x = 0, .y = 0, .z = 0, .lat = 44.80 * deg, .lon = 142.06 * deg };
     const coord_b = fkp_msm7.StationCoord{ .ref_station_id = 2, .x = 0, .y = 0, .z = 0, .lat = 43.80 * deg, .lon = 142.43 * deg };
     const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
-    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.005, .l2_m = 0.004, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.007, .l2_m = 0.0055, .rough_l1_m = 0, .rough_l2_m = 0 }};
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.0, .l2_m = 0.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.005, .l2_m = 0.004 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 0.007, .l2_m = 0.0055 }};
     const stations = [_]fkp_engine.StationObs{
         .{ .coord = coord_a, .obs = &obs_a },
         .{ .coord = coord_b, .obs = &obs_b },
@@ -410,9 +409,9 @@ test "fkp: computeFkp Hokkaido synthetic scale check" {
 
     // 典型的な電離層差: ~5mm/100km × 基線長
     // Δlat_B ≈ 110km, Δlat_C ≈ 135km → ΔL_GF ≈ 5mm, 7mm
-    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000000.0, .l2_m = 15604000.0, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000005.5, .l2_m = 15604004.3, .rough_l1_m = 0, .rough_l2_m = 0 }};
-    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000007.0, .l2_m = 15604005.5, .rough_l1_m = 0, .rough_l2_m = 0 }};
+    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000000.0, .l2_m = 15604000.0 }};
+    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000005.5, .l2_m = 15604004.3 }};
+    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 20000007.0, .l2_m = 15604005.5 }};
 
     const stations = [_]fkp_engine.StationObs{
         .{ .coord = coord_a, .obs = &obs_a },
@@ -460,106 +459,6 @@ fn writeMsm7TestHeader(bw: *fkp_bits.BitWriter) void {
     bw.writeU(64, (@as(u64, 1) << 63) | (@as(u64, 1) << 62) | (@as(u64, 1) << 61));
     // sig_mask: SigID 2 (L1C), 16 (L2C) → bit 30, 16
     bw.writeU(32, (@as(u32, 1) << 30) | (@as(u32, 1) << 16));
-}
-
-test "fkp: extractPhase exposes rough_range_m (Phase 6b)" {
-    // rough_range_m = (rough_int + rough_mod/1024) × c × 1e-3。
-    // phase_m との関係: phase_m = rough_range_m + fine_phase × 2^-29 × c × 1e-3。
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    var payload = [_]u8{0} ** 96;
-    var bw = fkp_bits.BitWriter.init(&payload);
-    writeMsm7TestHeader(&bw);
-    for (0..6) |_| bw.writeU(1, 1);
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 512);
-    bw.writeS(14, 0);
-    bw.writeU(8, 71);
-    bw.writeU(4, 0);
-    bw.writeU(10, 256);
-    bw.writeS(14, 0);
-    bw.writeU(8, 72);
-    bw.writeU(4, 0);
-    bw.writeU(10, 128);
-    bw.writeS(14, 0);
-    const fps = [_]i64{ 100000, 110000, 200000, 210000, 300000, 310000 };
-    for (fps) |fp| {
-        bw.writeS(20, 0);
-        bw.writeS(24, fp);
-        bw.writeU(10, 0);
-        bw.writeU(1, 0);
-        bw.writeU(10, 0);
-        bw.writeS(15, 0);
-    }
-
-    const obs = try fkp_msm7.extractPhase(alloc, &payload);
-    try std.testing.expectEqual(@as(usize, 6), obs.len);
-    // PRN 1 の rough_range_m = (70 + 512/1024) × 299792458 × 1e-3 ≈ 21135770 m
-    // phase_m との差 = fine_phase × 2^-29 × c × 1e-3 ≈ 100000 × 5.585e-7 ≈ 0.0559 m
-    const expected_rough_prn1 = (70.0 + 512.0 / 1024.0) * 1e-3 * 299792458.0;
-    try std.testing.expectApproxEqAbs(expected_rough_prn1, obs[0].rough_range_m, 1e-4);
-    // phase_m - rough_range_m が fine_phase の寄与に一致
-    const fine_contribution = 100000.0 / @as(f64, 1 << 29) * 1e-3 * 299792458.0;
-    try std.testing.expectApproxEqAbs(fine_contribution, obs[0].phase_m - obs[0].rough_range_m, 1e-9);
-}
-
-test "fkp: groupPhaseObs propagates rough_range_m to SatObs (Phase 6b)" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const phase_list = [_]fkp_msm7.PhaseObs{
-        .{ .prn = 5, .phase_m = 21000000.5, .rough_range_m = 21000000.0, .freq_hz = 1575.42e6, .band = .l1 },
-        .{ .prn = 5, .phase_m = 21000003.2, .rough_range_m = 21000003.0, .freq_hz = 1227.60e6, .band = .l2 },
-    };
-    const sat_obs = try fkp_engine.groupPhaseObs(alloc, &phase_list);
-    try std.testing.expectEqual(@as(usize, 1), sat_obs.len);
-    try std.testing.expectEqual(@as(u8, 5), sat_obs[0].prn);
-    try std.testing.expectApproxEqAbs(@as(f64, 21000000.5), sat_obs[0].l1_m.?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 21000000.0), sat_obs[0].rough_l1_m.?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 21000003.2), sat_obs[0].l2_m.?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 21000003.0), sat_obs[0].rough_l2_m.?, 1e-9);
-    // residual helper
-    try std.testing.expectApproxEqAbs(@as(f64, 0.5), sat_obs[0].l1_residual().?, 1e-9);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.2), sat_obs[0].l2_residual().?, 1e-9);
-}
-
-test "fkp: SatObs.l1_residual/l2_residual return null when rough or phase missing" {
-    const a = fkp_engine.SatObs{ .prn = 1, .l1_m = 1.0, .l2_m = null };
-    try std.testing.expectEqual(@as(?f64, null), a.l1_residual()); // rough null
-    try std.testing.expectEqual(@as(?f64, null), a.l2_residual()); // phase null
-
-    const b = fkp_engine.SatObs{ .prn = 1, .l1_m = null, .l2_m = 1.0, .rough_l2_m = 0.3 };
-    try std.testing.expectEqual(@as(?f64, null), b.l1_residual());
-    try std.testing.expectApproxEqAbs(@as(f64, 0.7), b.l2_residual().?, 1e-9);
-}
-
-test "fkp: computeFkp residual mode skips PRN when rough is missing (Phase 6b)" {
-    // Phase 6b: residual ベースになったので rough_*_m が null の SatObs は
-    // computeFkp で skip される (orelse continue)。
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const deg = std.math.pi / 180.0;
-    const coord_a = fkp_msm7.StationCoord{ .ref_station_id = 1, .x = 0, .y = 0, .z = 0, .lat = 44.80 * deg, .lon = 142.06 * deg };
-    const coord_b = fkp_msm7.StationCoord{ .ref_station_id = 2, .x = 0, .y = 0, .z = 0, .lat = 43.80 * deg, .lon = 142.43 * deg };
-    const coord_c = fkp_msm7.StationCoord{ .ref_station_id = 3, .x = 0, .y = 0, .z = 0, .lat = 43.58 * deg, .lon = 142.00 * deg };
-
-    // rough_*_m を指定しない → l1_residual/l2_residual が null → skip
-    const obs_a = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 1.0, .l2_m = 0.8 }};
-    const obs_b = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 2.0, .l2_m = 1.6 }};
-    const obs_c = [_]fkp_engine.SatObs{.{ .prn = 5, .l1_m = 3.0, .l2_m = 2.4 }};
-    const stations = [_]fkp_engine.StationObs{
-        .{ .coord = coord_a, .obs = &obs_a },
-        .{ .coord = coord_b, .obs = &obs_b },
-        .{ .coord = coord_c, .obs = &obs_c },
-    };
-    const fkp = try fkp_engine.computeFkp(alloc, &stations, .{ .max_magnitude = std.math.inf(f64) });
-    try std.testing.expectEqual(@as(usize, 0), fkp.len);
 }
 
 test "fkp: extractPhase full cell_mask returns all 6 observations" {

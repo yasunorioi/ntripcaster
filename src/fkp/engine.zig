@@ -26,8 +26,8 @@ pub const BETA: f64 = F2 * F2 / (F1 * F1 - F2 * F2); // ≈ 1.5457
 /// 真因は `computeFkp` が LIF を「衛星-局の geometric range を引いた
 /// double-difference 残差」ではなく生の搬送波位相観測値で計算しており、
 /// 衛星-局距離の km スケール勾配がそのまま FKP 係数に乗ってしまう構造的
-/// 問題 (docs/phase6-design.md § 1 参照)。本 Phase 6a 修正は safety net で、
-/// 根本対応は Phase 6b (geometric range removal) で行う。
+/// 問題 (docs/phase6-design.md § 1 参照)。本閾値は safety net で、根本
+/// 対応には ephemeris ベースの geometric range 計算が要る (Phase 7)。
 pub const DEFAULT_FKP_MAX_MAGNITUDE: f64 = 100.0;
 
 /// `computeFkp` の追加オプション。各フィールドはデフォルト値があるため
@@ -60,34 +60,10 @@ pub const FkpParam = struct {
 };
 
 /// 1 衛星の L1/L2 位相観測値 [m]。
-/// Phase 6b 以降は rough_l1_m / rough_l2_m も同伴し、`l1_residual()` /
-/// `l2_residual()` で `phase - rough` を返す。
 pub const SatObs = struct {
     prn: u8,
     l1_m: ?f64,
     l2_m: ?f64,
-    /// L1 用 rough pseudorange [m]。Phase 6b 以降の SD/DD で
-    /// `l1_m - rough_l1_m` を使うことで衛星-局 geometric range を消す。
-    /// 旧コード/テスト互換のため null 許容 (null なら residual は null)。
-    rough_l1_m: ?f64 = null,
-    /// L2 用 rough pseudorange [m]。
-    rough_l2_m: ?f64 = null,
-
-    /// L1 residual = l1_m − rough_l1_m。片方でも null なら null。
-    pub fn l1_residual(self: SatObs) ?f64 {
-        return if (self.l1_m) |l|
-            if (self.rough_l1_m) |r| l - r else null
-        else
-            null;
-    }
-
-    /// L2 residual = l2_m − rough_l2_m。片方でも null なら null。
-    pub fn l2_residual(self: SatObs) ?f64 {
-        return if (self.l2_m) |l|
-            if (self.rough_l2_m) |r| l - r else null
-        else
-            null;
-    }
 };
 
 /// 1 局の観測データ（座標 + 全衛星観測値）
@@ -112,14 +88,8 @@ pub fn groupPhaseObs(
             gop.value_ptr.* = .{ .prn = p.prn, .l1_m = null, .l2_m = null };
         }
         switch (p.band) {
-            .l1 => {
-                gop.value_ptr.*.l1_m = p.phase_m;
-                gop.value_ptr.*.rough_l1_m = p.rough_range_m;
-            },
-            .l2 => {
-                gop.value_ptr.*.l2_m = p.phase_m;
-                gop.value_ptr.*.rough_l2_m = p.rough_range_m;
-            },
+            .l1 => gop.value_ptr.*.l1_m = p.phase_m,
+            .l2 => gop.value_ptr.*.l2_m = p.phase_m,
             else => {},
         }
     }
@@ -191,18 +161,14 @@ pub fn computeFkp(
         const obs_b = findSatObs(sta_b.obs, prn) orelse continue;
         const obs_c = findSatObs(sta_c.obs, prn) orelse continue;
 
-        // Phase 6b: residual = phase − rough_range を使う。これで衛星-局の
-        // geometric range (~km) が消え、残るは iono + tropo + clock + N·λ
-        // + ε で m スケール。rough_l1_m / rough_l2_m が未設定 (= 旧テスト)
-        // の SatObs は residual が null になり PRN がスキップされる。
-        const l1a = obs_a.l1_residual() orelse continue;
-        const l1b = obs_b.l1_residual() orelse continue;
-        const l1c = obs_c.l1_residual() orelse continue;
-        const l2a = obs_a.l2_residual() orelse continue;
-        const l2b = obs_b.l2_residual() orelse continue;
-        const l2c = obs_c.l2_residual() orelse continue;
+        const l1a = obs_a.l1_m orelse continue;
+        const l1b = obs_b.l1_m orelse continue;
+        const l1c = obs_c.l1_m orelse continue;
+        const l2a = obs_a.l2_m orelse continue;
+        const l2b = obs_b.l2_m orelse continue;
+        const l2c = obs_c.l2_m orelse continue;
 
-        // 一重位相差 [m] (residual ベース)
+        // 一重位相差 [m]
         const dl1_b = l1b - l1a;
         const dl1_c = l1c - l1a;
         const dl2_b = l2b - l2a;
@@ -225,9 +191,9 @@ pub fn computeFkp(
         // Phase 6a: 物理妥当性チェック。computeFkp の入力 (= 生の搬送波位相
         // 観測値) には衛星-局距離の km スケール勾配が含まれるため、3 局
         // triangle が縮退気味だと FkpParam が物理的にあり得ない大きさになる
-        // 構造的問題がある (docs/phase6-design.md § 1)。本格的な修正は
-        // Phase 6b 以降で geometric range removal を入れるが、当面の safety
-        // net として閾値超過の PRN は出力に含めない。
+        // 構造的問題がある (docs/phase6-design.md § 1)。根本対応は Phase 7
+        // (ephemeris + DD + LAMBDA) で行うが、当面の safety net として閾値
+        // 超過の PRN は出力に含めない。
         const max_abs = @max(@max(@abs(n_i), @abs(e_i)), @max(@abs(n_0), @abs(e_0)));
         if (max_abs > options.max_magnitude) {
             if (options.stats) |s| s.dropped_excess += 1;

@@ -334,10 +334,34 @@ station/sat clock 消去) + § 5.1.5 (初回 epoch DD = ambiguity baseline、
 
 設計メモ § 2.2 を訂正済み (`docs/phase6-design.md`)。
 
-**未着手 (Phase 6 残り)**:
-- ⚠️ Phase 6b-4 (DD reference PRN 選定 + SD/DD)、Phase 6b-5 (ambiguity
-  baseline + lock_time cycle slip 検出)。設計メモの工数見積は約 7-8 時間。
-  次セッションで一気に完成させる予定。
+**Phase 6b 全体撤去 (2026-05-18 決定)**:
+
+Phase 6b-3 の理論再分析と実機検証結果を踏まえ、案 B 全体を撤去し Phase 7
+(ephemeris + DD + LAMBDA) に直行する判断を下した (詳細: `docs/phase6-design.md` § 9.1)。
+
+撤去の根拠:
+- residual = phase − rough_range は **rounding noise** (±4.7 m wrap、物理
+  情報なし)。設計メモ § 2.2 の前提が誤読 (MSM7 spec § 3.5.16 解釈ミス)。
+- 設計メモ § 5.1.4-5 の「DD + 時間差 baseline」は raw `phase_m` + 真の
+  geometric range removal を前提とした構成。残差 noise に対して同じ構造を
+  組んでも、入力が物理情報を持たないので出力も noise のまま。
+- 真の geometric range removal は ephemeris ベースの衛星 ECEF 計算が必須で、
+  これは Phase 7 (案 A) のスコープ。
+
+撤去内容 (本 commit):
+- `src/fkp/msm7.zig`: `PhaseObs.rough_range_m` フィールド削除 +
+  extractPhase の rough_range_m 計算行を削除。
+- `src/fkp/engine.zig`: `SatObs.rough_l1_m/rough_l2_m` + `l1_residual()` /
+  `l2_residual()` helper 削除。`computeFkp` を raw `l1_m/l2_m` 直接参照に
+  revert (Phase 5b/6a と同じ挙動)。閾値判定 (Phase 6a) は維持。
+- `tests/test_fkp.zig`: Phase 6b 関連 test 4 件を削除 + 既存 SatObs literal
+  12 個から `.rough_l1_m = 0, .rough_l2_m = 0` を除去。テスト件数は Phase
+  6b-3 時点から -4 件で Phase 6a 完了時に戻る。
+- `docs/phase6-design.md`: § 2.2 を「案 B 棄却」に書き換え、§ 5 全体に
+  「撤去」マーカー追加、§ 9 に経緯と Phase 6a 暫定運用の説明を追加。
+
+build/test 通過 (docker linux/arm64 ntripcaster-zig:0.15.2)。
+Phase 6a 状態 (master/300bf5a 相当) に戻り、次は Phase 7 設計から着手。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
