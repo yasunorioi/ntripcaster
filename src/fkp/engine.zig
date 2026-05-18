@@ -59,11 +59,35 @@ pub const FkpParam = struct {
     e_0: f64, // 東方向
 };
 
-/// 1 衛星の L1/L2 位相観測値 [m]
+/// 1 衛星の L1/L2 位相観測値 [m]。
+/// Phase 6b 以降は rough_l1_m / rough_l2_m も同伴し、`l1_residual()` /
+/// `l2_residual()` で `phase - rough` を返す。
 pub const SatObs = struct {
     prn: u8,
     l1_m: ?f64,
     l2_m: ?f64,
+    /// L1 用 rough pseudorange [m]。Phase 6b 以降の SD/DD で
+    /// `l1_m - rough_l1_m` を使うことで衛星-局 geometric range を消す。
+    /// 旧コード/テスト互換のため null 許容 (null なら residual は null)。
+    rough_l1_m: ?f64 = null,
+    /// L2 用 rough pseudorange [m]。
+    rough_l2_m: ?f64 = null,
+
+    /// L1 residual = l1_m − rough_l1_m。片方でも null なら null。
+    pub fn l1_residual(self: SatObs) ?f64 {
+        return if (self.l1_m) |l|
+            if (self.rough_l1_m) |r| l - r else null
+        else
+            null;
+    }
+
+    /// L2 residual = l2_m − rough_l2_m。片方でも null なら null。
+    pub fn l2_residual(self: SatObs) ?f64 {
+        return if (self.l2_m) |l|
+            if (self.rough_l2_m) |r| l - r else null
+        else
+            null;
+    }
 };
 
 /// 1 局の観測データ（座標 + 全衛星観測値）
@@ -88,8 +112,14 @@ pub fn groupPhaseObs(
             gop.value_ptr.* = .{ .prn = p.prn, .l1_m = null, .l2_m = null };
         }
         switch (p.band) {
-            .l1 => gop.value_ptr.*.l1_m = p.phase_m,
-            .l2 => gop.value_ptr.*.l2_m = p.phase_m,
+            .l1 => {
+                gop.value_ptr.*.l1_m = p.phase_m;
+                gop.value_ptr.*.rough_l1_m = p.rough_range_m;
+            },
+            .l2 => {
+                gop.value_ptr.*.l2_m = p.phase_m;
+                gop.value_ptr.*.rough_l2_m = p.rough_range_m;
+            },
             else => {},
         }
     }
@@ -161,14 +191,18 @@ pub fn computeFkp(
         const obs_b = findSatObs(sta_b.obs, prn) orelse continue;
         const obs_c = findSatObs(sta_c.obs, prn) orelse continue;
 
-        const l1a = obs_a.l1_m orelse continue;
-        const l1b = obs_b.l1_m orelse continue;
-        const l1c = obs_c.l1_m orelse continue;
-        const l2a = obs_a.l2_m orelse continue;
-        const l2b = obs_b.l2_m orelse continue;
-        const l2c = obs_c.l2_m orelse continue;
+        // Phase 6b: residual = phase − rough_range を使う。これで衛星-局の
+        // geometric range (~km) が消え、残るは iono + tropo + clock + N·λ
+        // + ε で m スケール。rough_l1_m / rough_l2_m が未設定 (= 旧テスト)
+        // の SatObs は residual が null になり PRN がスキップされる。
+        const l1a = obs_a.l1_residual() orelse continue;
+        const l1b = obs_b.l1_residual() orelse continue;
+        const l1c = obs_c.l1_residual() orelse continue;
+        const l2a = obs_a.l2_residual() orelse continue;
+        const l2b = obs_b.l2_residual() orelse continue;
+        const l2c = obs_c.l2_residual() orelse continue;
 
-        // 一重位相差 [m]
+        // 一重位相差 [m] (residual ベース)
         const dl1_b = l1b - l1a;
         const dl1_c = l1c - l1a;
         const dl2_b = l2b - l2a;

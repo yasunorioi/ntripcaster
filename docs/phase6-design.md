@@ -78,30 +78,52 @@ LAMBDA は数値的にデリケート、cycle slip 検出も必要。
 
 ### 2.2 案 B: rough_range を使った近似 geometric range subtraction
 
-MSM7 の各観測値には `rough_range_ms = rough_int + rough_mod/1024` という
-**衛星-局の見かけ距離 [ms]** が同梱されている。これを `ρ_approx` として
-使い、`L̃ = L − ρ_approx ≈ I + T + N·λ` (ms 級スケール) を作る。
+> ⚠️ **2026-05-18 訂正**: 当初本節は「MSM7 の rough_range_ms は衛星-局の
+> 見かけ距離 (geometric range の近似)」と書いていたが、Phase 6b-3 の実機
+> 検証で **これは誤り** であることが判明した。
+>
+> MSM7 spec (RTCM 10403.3 § 3.5.16) の `rough_int + rough_mod/1024` は、
+> 受信機の **carrier phase 観測値そのもの** を 1/1024 ms 精度に量子化した
+> 値であり、fine_phase は同じ観測値の更なる細かい桁 (2^-29 ms) を表す
+> "encoding remainder"。つまり `phase_m = rough_range_m + fine_correction`
+> という **同一観測値の coarse + fine 2 段表現** に過ぎず、引いても
+> geometric range の分離にはならない。
+>
+> 引き算で残るのは fine_phase × c × 2^-29 × 1e-3 = **rounding noise (±4.7m)**
+> だけで、ここには iono / clock / N·λ などの物理情報は **含まれない**
+> (これらは rough_range の coarse 部分にまとめて畳み込まれている)。
+>
+> 実機確認結果: Phase 6b-3 で residual ベースに置換しても、Paris 三角測量
+> の `excess=13` カウンタは Phase 6a と同じ (= FKP 値が依然として閾値 100
+> m/rad を超える)。理由は LIF (×ALPHA+BETA ≈ ×4) で増幅 + inv_a (~6400
+> 1/rad in Paris) で割って結局 100,000+ m/rad に膨らむため。
+
+**訂正後の理解**: case B 単体では magnitude 問題は解決しない。**DD (案 B
+§ 5.1.4) + ambiguity baseline (§ 5.1.5) と組み合わせて初めて**、時間的
+DD-差分 = iono 時間変化 (cm-scale) のみが残り、FKP が物理妥当に収まる
+仕組みになる。
 
 ```zig
-L_residual_a = phase_obs_a - rough_range_m_a   // ~m scale (with N·λ ambiguity)
+L_residual_a = phase_obs_a - rough_range_m_a   // ±4.7m (rounding noise only)
 ```
 
-このまま SD/DD すれば clock と T は消える。N·λ は cycle slip がない限り
-**1 epoch 内で stable**。連続 epoch の **差分** (= epoch-to-epoch DD)
-を取れば N も消えて純粋な iono 変化 (cm/sec) になる。
+SD/DD で station/sat clock を消し、初回 epoch の DD を ambiguity baseline
+として記録、以降の epoch では `DD(t) − DD(t_0)` を residual として平面 fit。
+これで cycle slip がない限り cm-scale 残差で FKP 計算可能。
 
 | 工程 | 内容 | 規模 |
 | --- | --- | --- |
 | extractPhase 拡張 | rough_range_m も返すよう改修 | ~30 行 |
-| Eph parse 不要 | rough_range で代用 | 0 行 |
 | Residual 計算 | L - rough を SatObs に保存 | ~50 行 |
 | Single-epoch DD | reference PRN 選定 + SD/DD | ~200 行 |
+| Ambiguity baseline | 初回 epoch DD を保存 + 以降は差分 | ~150 行 |
+| cycle slip 検出 | lock_time_indicator 監視 + baseline reset | ~100 行 |
 | computeFkp 改修 | DD residual ベースに置換 | ~100 行 |
-| **合計** | | **~400 行** |
+| **合計** | | **~630 行** |
 
 位置精度は本格版より落ちる (rough_range の量子化は 1/1024 ms ≈ 293 m、
-fine_phase で詰めても N·λ が DD で残る) が、補正値の magnitude は **physical
-plausible range (cm scale)** に収まることを期待できる。
+fine_phase で詰めても N·λ DD の baseline 推定誤差が残る) が、補正値の
+magnitude は **physical plausible range (cm-dm scale)** に収まる見込み。
 
 ### 2.3 案 C: 数 epoch を見て補正値を統計的に間引く (heuristic)
 

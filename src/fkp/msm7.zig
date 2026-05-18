@@ -56,8 +56,12 @@ pub fn gpsFreqFromSigId(sig_id: u32) f64 {
 /// 1衛星・1シグナルの搬送波位相観測値
 pub const PhaseObs = struct {
     prn: u8,
-    /// 搬送波位相 [m]
+    /// 搬送波位相 [m] = (rough_int + rough_mod/1024 + fine_phase·2^-29) × c × 1e-3
     phase_m: f64,
+    /// rough pseudorange [m] = (rough_int + rough_mod/1024) × c × 1e-3。
+    /// Phase 6b で `phase_m - rough_range_m` を residual として SD/DD に
+    /// 投入し、衛星-局の geometric range (km scale) を消すために使う。
+    rough_range_m: f64,
     /// シグナル周波数 [Hz]
     freq_hz: f64,
     /// バンド (L1/L2/L5)
@@ -228,6 +232,7 @@ pub fn extractPhase(
             const fine_ms: f64 = @as(f64, @floatFromInt(fine_phase)) * (1.0 / @as(f64, 1 << 29));
             const phase_ms: f64 = rough_ms + fine_ms;
             const phase_m: f64 = phase_ms * 1e-3 * LIGHT_SPEED;
+            const rough_range_m: f64 = rough_ms * 1e-3 * LIGHT_SPEED;
 
             const sig_id = if (gi < sig_count) sig_ids[gi] else 2;
             const freq = gpsFreqFromSigId(sig_id);
@@ -236,6 +241,7 @@ pub fn extractPhase(
             try obs_list.append(allocator, .{
                 .prn = prns[si],
                 .phase_m = phase_m,
+                .rough_range_m = rough_range_m,
                 .freq_hz = freq,
                 .band = band,
             });

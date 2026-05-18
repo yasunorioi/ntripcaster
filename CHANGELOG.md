@@ -294,10 +294,50 @@ geometric range removal を入れる必要あり。
     カウンタはゼロ。配線済みの Phase 5b-3 を破壊しない safety net として
     意図通り動作。
 
+**Phase 6b-1/2/3: rough_range 配管 + residual 化 (中間実装)**:
+
+phase6-fkp-residual ブランチ (master ← phase4-vrs マージ後に派生) で着手。
+設計メモ § 5.1.1〜5.1.3 まで完了。
+
+- `src/fkp/msm7.zig::PhaseObs` に `rough_range_m: f64` 追加。
+  `extractPhase` 内で `(rough_int + rough_mod/1024) × c × 1e-3` から計算
+  して各 PRN×band cell に格納。
+- `src/fkp/engine.zig::SatObs` に `rough_l1_m: ?f64` / `rough_l2_m: ?f64`
+  追加。`groupPhaseObs` で PhaseObs から伝搬。
+- `SatObs.l1_residual()` / `l2_residual()` helper 追加 (`phase − rough`、
+  片方 null なら null)。
+- `computeFkp` の SD 計算を `obs_x.l1_residual() orelse continue` に置換。
+  rough が未設定の SatObs (旧テスト / GLONASS 等で band 違い) は skip。
+- 既存テストの SatObs 引数 12 個に `.rough_l1_m = 0, .rough_l2_m = 0` を
+  追加 (residual = phase で旧挙動を保つ)。
+- 新規テスト 4 件: extractPhase で rough_range_m が露出 / groupPhaseObs
+  で SatObs に伝搬 / residual helper の null 安全 / residual mode で
+  rough なし SatObs が skip される。
+
+⚠️ **実機検証で発見**: 設計メモ § 2.2 の前提に重要な誤りあり。
+
+MSM7 の `rough_int + rough_mod/1024` は **衛星-局の geometric range の
+近似ではなく**、carrier phase 観測値そのものを 1/1024 ms 精度に量子化した
+値。fine_phase は同じ観測値の細かい桁 (2^-29 ms) を表す encoding remainder
+で、`phase_m = rough_range_m + fine_correction` は同一観測値の coarse +
+fine 2 段表現に過ぎない。引いても geometric range は分離されず、残るのは
+fine_phase × 2^-29 × c × 1e-3 ≈ ±4.7 m の **rounding noise** のみ。
+
+実機確認 (docker centipede-paris, 30s rover): Phase 6a と同じく
+`excess=13` 毎 cycle / rover summary `phase_corrected=90 corr_failed=0`。
+Phase 6b-3 だけでは magnitude 問題は **改善しない**。
+
+**真の解決には DD + ambiguity baseline が必須**: 設計メモ § 5.1.4 (DD で
+station/sat clock 消去) + § 5.1.5 (初回 epoch DD = ambiguity baseline、
+以降 `DD(t) − DD(t_0)` を residual に) で時間的 DD-差分 (cm-scale iono
+変化) のみが残り、FKP が物理妥当に収まる仕組みになる。
+
+設計メモ § 2.2 を訂正済み (`docs/phase6-design.md`)。
+
 **未着手 (Phase 6 残り)**:
-- ⚠️ Phase 6b (rough_range residual + DD + 簡易 ambiguity) を別ブランチ
-  (`phase6-fkp-residual` 等) で着手予定。`phase4-vrs` を master に
-  マージしてから派生させる。
+- ⚠️ Phase 6b-4 (DD reference PRN 選定 + SD/DD)、Phase 6b-5 (ambiguity
+  baseline + lock_time cycle slip 検出)。設計メモの工数見積は約 7-8 時間。
+  次セッションで一気に完成させる予定。
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
 
