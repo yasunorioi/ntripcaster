@@ -8,6 +8,45 @@ const fkp_engine = ntripcaster.fkp.engine;
 const fkp_type59 = ntripcaster.fkp.type59;
 const fkp_runtime = ntripcaster.fkp.runtime;
 const fkp_vrs = ntripcaster.fkp.vrs;
+const fkp_eph = ntripcaster.fkp.ephemeris;
+const fkp_orbit = ntripcaster.fkp.orbit;
+
+/// 全フィールドをゼロで埋めた GpsEphemeris。テスト個別で必要な値だけ後から
+/// 上書きする (構造体リテラル冗長化を避ける)。
+fn zeroGpsEph() fkp_eph.GpsEphemeris {
+    return .{
+        .prn = 0,
+        .week_mod1024 = 0,
+        .sv_acc = 0,
+        .code_on_l2 = 0,
+        .iode = 0,
+        .iodc = 0,
+        .sv_health = 0,
+        .l2p_flag = 0,
+        .fit_interval_flag = 0,
+        .toc_s = 0,
+        .toe_s = 0,
+        .af0_s = 0,
+        .af1_s_per_s = 0,
+        .af2_s_per_s2 = 0,
+        .crs_m = 0,
+        .crc_m = 0,
+        .cuc_rad = 0,
+        .cus_rad = 0,
+        .cic_rad = 0,
+        .cis_rad = 0,
+        .dn_rad_per_s = 0,
+        .m0_rad = 0,
+        .ecc = 0,
+        .sqrt_a_m = 5153.6,
+        .omega0_rad = 0,
+        .omdot_rad_per_s = 0,
+        .i0_rad = 0,
+        .idot_rad_per_s = 0,
+        .argp_rad = 0,
+        .tgd_s = 0,
+    };
+}
 
 // ── BitReader / BitWriter ─────────────────────────────────────────────────────
 
@@ -951,4 +990,748 @@ test "fkp: extractPhase partial cell_mask preserves bit offset" {
             1e-4,
         );
     }
+}
+
+// ── Phase 7-1: GPS broadcast ephemeris (Type 1019) ────────────────────────
+
+/// Type 1019 ペイロード (61 byte = 488 bit) を組み立てるヘルパー。
+/// 全 raw scaled int を呼び出し側が与え、bit 配置は spec (RTCM 10403.3
+/// § 3.5.13) 通りに書く。
+fn buildMsg1019Payload(
+    buf: *[61]u8,
+    fields: struct {
+        prn: u8,
+        week_mod1024: u16,
+        sv_acc: u4,
+        code_on_l2: u2,
+        idot_raw: i64,
+        iode: u8,
+        toc_raw: u64,
+        af2_raw: i64,
+        af1_raw: i64,
+        af0_raw: i64,
+        iodc: u16,
+        crs_raw: i64,
+        dn_raw: i64,
+        m0_raw: i64,
+        cuc_raw: i64,
+        ecc_raw: u64,
+        cus_raw: i64,
+        sqrt_a_raw: u64,
+        toe_raw: u64,
+        cic_raw: i64,
+        omega0_raw: i64,
+        cis_raw: i64,
+        inc_raw: i64,
+        crc_raw: i64,
+        argp_raw: i64,
+        omdot_raw: i64,
+        tgd_raw: i64,
+        sv_health: u6,
+        l2p_flag: u1,
+        fit_interval_flag: u1,
+    },
+) void {
+    @memset(buf, 0);
+    var bw = fkp_bits.BitWriter.init(buf);
+    bw.writeU(12, 1019);
+    bw.writeU(6, fields.prn);
+    bw.writeU(10, fields.week_mod1024);
+    bw.writeU(4, fields.sv_acc);
+    bw.writeU(2, fields.code_on_l2);
+    bw.writeS(14, fields.idot_raw);
+    bw.writeU(8, fields.iode);
+    bw.writeU(16, fields.toc_raw);
+    bw.writeS(8, fields.af2_raw);
+    bw.writeS(16, fields.af1_raw);
+    bw.writeS(22, fields.af0_raw);
+    bw.writeU(10, fields.iodc);
+    bw.writeS(16, fields.crs_raw);
+    bw.writeS(16, fields.dn_raw);
+    bw.writeS(32, fields.m0_raw);
+    bw.writeS(16, fields.cuc_raw);
+    bw.writeU(32, fields.ecc_raw);
+    bw.writeS(16, fields.cus_raw);
+    bw.writeU(32, fields.sqrt_a_raw);
+    bw.writeU(16, fields.toe_raw);
+    bw.writeS(16, fields.cic_raw);
+    bw.writeS(32, fields.omega0_raw);
+    bw.writeS(16, fields.cis_raw);
+    bw.writeS(32, fields.inc_raw);
+    bw.writeS(16, fields.crc_raw);
+    bw.writeS(32, fields.argp_raw);
+    bw.writeS(24, fields.omdot_raw);
+    bw.writeS(8, fields.tgd_raw);
+    bw.writeU(6, fields.sv_health);
+    bw.writeU(1, fields.l2p_flag);
+    bw.writeU(1, fields.fit_interval_flag);
+}
+
+test "fkp: parseMsg1019 decodes all fields with correct SI scaling" {
+    // 全 field に distinct な raw 値を入れて、scale を素直に掛けたものが
+    // パース結果と一致することを確認 (符号 + scale)。
+    var buf: [61]u8 = undefined;
+    buildMsg1019Payload(&buf, .{
+        .prn = 13,
+        .week_mod1024 = 1023,
+        .sv_acc = 0,
+        .code_on_l2 = 1,
+        .idot_raw = -3000,
+        .iode = 99,
+        .toc_raw = 12345,
+        .af2_raw = 5,
+        .af1_raw = -7,
+        .af0_raw = 1000000,
+        .iodc = 250,
+        .crs_raw = 320, // 320 × 2^-5 = 10.0 m
+        .dn_raw = 4000,
+        .m0_raw = 100000000,
+        .cuc_raw = -500,
+        .ecc_raw = 1717986918, // ≒ 0.2
+        .cus_raw = 500,
+        .sqrt_a_raw = 2702924288, // ≒ 5153.6 √m (近似)
+        .toe_raw = 7200,
+        .cic_raw = -200,
+        .omega0_raw = -200000000,
+        .cis_raw = 200,
+        .inc_raw = 500000000,
+        .crc_raw = -640, // -640 × 2^-5 = -20.0 m
+        .argp_raw = 300000000,
+        .omdot_raw = -8000,
+        .tgd_raw = -10,
+        .sv_health = 0,
+        .l2p_flag = 1,
+        .fit_interval_flag = 0,
+    });
+
+    const eph = fkp_eph.parseMsg1019(&buf) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    const pi = std.math.pi;
+    const pow2_m29 = 1.0 / 536870912.0;
+    const pow2_m31 = 1.0 / 2147483648.0;
+    const pow2_m33 = 1.0 / 8589934592.0;
+    const pow2_m43 = 1.0 / 8796093022208.0;
+    const pow2_m55 = 1.0 / 36028797018963968.0;
+    const pow2_m19 = 1.0 / 524288.0;
+
+    try std.testing.expectEqual(@as(u8, 13), eph.prn);
+    try std.testing.expectEqual(@as(u16, 1023), eph.week_mod1024);
+    try std.testing.expectEqual(@as(u4, 0), eph.sv_acc);
+    try std.testing.expectEqual(@as(u2, 1), eph.code_on_l2);
+    try std.testing.expectEqual(@as(u8, 99), eph.iode);
+    try std.testing.expectEqual(@as(u10, 250), eph.iodc);
+    try std.testing.expectEqual(@as(u6, 0), eph.sv_health);
+    try std.testing.expectEqual(@as(u1, 1), eph.l2p_flag);
+    try std.testing.expectEqual(@as(u1, 0), eph.fit_interval_flag);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 12345.0 * 16.0), eph.toc_s, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 7200.0 * 16.0), eph.toe_s, 1e-9);
+
+    try std.testing.expectApproxEqAbs(1000000.0 * pow2_m31, eph.af0_s, 1e-15);
+    try std.testing.expectApproxEqAbs(-7.0 * pow2_m43, eph.af1_s_per_s, 1e-20);
+    try std.testing.expectApproxEqAbs(5.0 * pow2_m55, eph.af2_s_per_s2, 1e-25);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), eph.crs_m, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, -20.0), eph.crc_m, 1e-9);
+
+    try std.testing.expectApproxEqAbs(-500.0 * pow2_m29, eph.cuc_rad, 1e-15);
+    try std.testing.expectApproxEqAbs(500.0 * pow2_m29, eph.cus_rad, 1e-15);
+    try std.testing.expectApproxEqAbs(-200.0 * pow2_m29, eph.cic_rad, 1e-15);
+    try std.testing.expectApproxEqAbs(200.0 * pow2_m29, eph.cis_rad, 1e-15);
+
+    try std.testing.expectApproxEqAbs(4000.0 * pow2_m43 * pi, eph.dn_rad_per_s, 1e-22);
+    try std.testing.expectApproxEqAbs(100000000.0 * pow2_m31 * pi, eph.m0_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(-200000000.0 * pow2_m31 * pi, eph.omega0_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(500000000.0 * pow2_m31 * pi, eph.i0_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(300000000.0 * pow2_m31 * pi, eph.argp_rad, 1e-10);
+    try std.testing.expectApproxEqAbs(-3000.0 * pow2_m43 * pi, eph.idot_rad_per_s, 1e-22);
+    try std.testing.expectApproxEqAbs(-8000.0 * pow2_m43 * pi, eph.omdot_rad_per_s, 1e-22);
+
+    try std.testing.expectApproxEqAbs(1717986918.0 * pow2_m33, eph.ecc, 1e-15);
+    try std.testing.expectApproxEqAbs(2702924288.0 * pow2_m19, eph.sqrt_a_m, 1e-10);
+
+    try std.testing.expectApproxEqAbs(-10.0 * pow2_m31, eph.tgd_s, 1e-15);
+}
+
+test "fkp: parseMsg1019 rejects payload that is too short" {
+    const short = [_]u8{0} ** 30;
+    try std.testing.expectEqual(@as(?fkp_eph.GpsEphemeris, null), fkp_eph.parseMsg1019(&short));
+}
+
+test "fkp: parseMsg1019 rejects non-1019 message types" {
+    var buf: [61]u8 = undefined;
+    @memset(&buf, 0);
+    var bw = fkp_bits.BitWriter.init(&buf);
+    bw.writeU(12, 1077); // MSM7、1019 ではない
+    try std.testing.expectEqual(@as(?fkp_eph.GpsEphemeris, null), fkp_eph.parseMsg1019(&buf));
+}
+
+test "fkp: EphemerisStore upsert + lookup roundtrip" {
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const eph1 = fkp_eph.GpsEphemeris{
+        .prn = 5,
+        .week_mod1024 = 100,
+        .sv_acc = 0,
+        .code_on_l2 = 0,
+        .iode = 10,
+        .iodc = 10,
+        .sv_health = 0,
+        .l2p_flag = 0,
+        .fit_interval_flag = 0,
+        .toc_s = 0,
+        .toe_s = 0,
+        .af0_s = 0,
+        .af1_s_per_s = 0,
+        .af2_s_per_s2 = 0,
+        .crs_m = 0,
+        .crc_m = 0,
+        .cuc_rad = 0,
+        .cus_rad = 0,
+        .cic_rad = 0,
+        .cis_rad = 0,
+        .dn_rad_per_s = 0,
+        .m0_rad = 0,
+        .ecc = 0,
+        .sqrt_a_m = 5153.6,
+        .omega0_rad = 0,
+        .omdot_rad_per_s = 0,
+        .i0_rad = 0,
+        .idot_rad_per_s = 0,
+        .argp_rad = 0,
+        .tgd_s = 0,
+    };
+
+    try store.upsertGps(eph1, 1000);
+    try std.testing.expectEqual(@as(usize, 1), store.countGps());
+
+    const got1 = store.lookupGps(5) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expectEqual(@as(u8, 10), got1.eph.iode);
+    try std.testing.expectEqual(@as(i64, 1000), got1.received_at_ms);
+    try std.testing.expectApproxEqAbs(@as(f64, 5153.6), got1.eph.sqrt_a_m, 1e-9);
+
+    // 同一 PRN、IODE 更新で上書き
+    var eph2 = eph1;
+    eph2.iode = 20;
+    try store.upsertGps(eph2, 2000);
+    try std.testing.expectEqual(@as(usize, 1), store.countGps());
+    try std.testing.expectEqual(@as(u8, 20), store.lookupGps(5).?.eph.iode);
+    try std.testing.expectEqual(@as(i64, 2000), store.lookupGps(5).?.received_at_ms);
+
+    // 別 PRN は別エントリ
+    var eph3 = eph1;
+    eph3.prn = 7;
+    try store.upsertGps(eph3, 3000);
+    try std.testing.expectEqual(@as(usize, 2), store.countGps());
+    try std.testing.expectEqual(@as(?fkp_eph.EphemerisStore.Entry, null), store.lookupGps(99));
+}
+
+test "fkp: parseMsg1019 + EphemerisStore integration" {
+    // bit pattern を組んで parse → store に upsert → lookup で fields 再確認
+    var buf: [61]u8 = undefined;
+    buildMsg1019Payload(&buf, .{
+        .prn = 7,
+        .week_mod1024 = 500,
+        .sv_acc = 1,
+        .code_on_l2 = 1,
+        .idot_raw = 100,
+        .iode = 42,
+        .toc_raw = 6300,
+        .af2_raw = 0,
+        .af1_raw = 1,
+        .af0_raw = -50,
+        .iodc = 42,
+        .crs_raw = 64,
+        .dn_raw = 100,
+        .m0_raw = 100000,
+        .cuc_raw = 0,
+        .ecc_raw = 0,
+        .cus_raw = 0,
+        .sqrt_a_raw = 2702924288,
+        .toe_raw = 6300,
+        .cic_raw = 0,
+        .omega0_raw = 0,
+        .cis_raw = 0,
+        .inc_raw = 0,
+        .crc_raw = 0,
+        .argp_raw = 0,
+        .omdot_raw = 0,
+        .tgd_raw = 0,
+        .sv_health = 0,
+        .l2p_flag = 0,
+        .fit_interval_flag = 0,
+    });
+
+    const eph = fkp_eph.parseMsg1019(&buf) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+    try store.upsertGps(eph, 12345);
+
+    const got = store.lookupGps(7) orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expectEqual(@as(u8, 7), got.eph.prn);
+    try std.testing.expectEqual(@as(u8, 42), got.eph.iode);
+    try std.testing.expectEqual(@as(u10, 42), got.eph.iodc);
+    try std.testing.expectEqual(@as(u16, 500), got.eph.week_mod1024);
+    // toc/toe = 6300 × 16 = 100800 s
+    try std.testing.expectApproxEqAbs(@as(f64, 100800.0), got.eph.toc_s, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 100800.0), got.eph.toe_s, 1e-9);
+}
+
+// ── Phase 7-2: GPS satellite ECEF propagator + light-time + sat clock ─────
+
+test "fkp.orbit: gpsSatEcef circular orbit at toe places sat at (a, 0, 0)" {
+    // ecc=0, omdot=0, idot=0, 摂動全ゼロ、toe=0, m0=0, argp=0, omega0=0, i0=0
+    // → 真近点角 v=0, 引数 u=0, xp=a, yp=0, omega=0, incl=0
+    // → ECEF = (a·1, a·0, 0) = (a, 0, 0)
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.79; // realistic GPS semi-major axis ~ 26561 km
+    const pos = fkp_orbit.gpsSatEcef(eph, 0.0);
+
+    const a = eph.sqrt_a_m * eph.sqrt_a_m;
+    try std.testing.expectApproxEqAbs(a, pos.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), pos.y, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), pos.z, 1e-6);
+}
+
+test "fkp.orbit: gpsSatEcef magnitude equals semi-major axis when ecc=0" {
+    // ecc=0 / 摂動ゼロでも omega0/i0/m0 を任意に振ると ECEF は (a·cos, a·sin) 平面に
+    // 乗るが magnitude は a。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.6;
+    eph.m0_rad = 1.234;
+    eph.omega0_rad = 0.5;
+    eph.i0_rad = 0.9;
+    eph.argp_rad = -0.3;
+
+    const pos = fkp_orbit.gpsSatEcef(eph, 0.0);
+    const a = eph.sqrt_a_m * eph.sqrt_a_m;
+    const r = std.math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);
+    try std.testing.expectApproxEqAbs(a, r, 1e-3);
+}
+
+test "fkp.orbit: gpsSatEcef Kepler residual is below 1e-12 (ecc=0.05)" {
+    // 偏心が大きい衛星 (実 GPS は ecc ≲ 0.02 だが LEO 等を想定し 0.05) でも
+    // Newton 反復で M = E - e·sin(E) 残差が 1e-12 rad 以下に収束する。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.6;
+    eph.ecc = 0.05;
+    eph.m0_rad = 0.7; // arbitrary mean anomaly
+    const pos = fkp_orbit.gpsSatEcef(eph, 0.0);
+    const ek = pos.eccentric_anomaly_rad;
+    const mk = eph.m0_rad; // at t_sow=0, toe=0 → tk=0, n·tk=0 → mk=m0
+    const residual = ek - eph.ecc * @sin(ek) - mk;
+    try std.testing.expect(@abs(residual) < 1e-12);
+}
+
+test "fkp.orbit: gpsSatEcef week wrap (tk - SECONDS_PER_WEEK) preserves trajectory" {
+    // 同じ衛星位置を t_sow = toe + 100 と t_sow = toe + 100 + SECONDS_PER_WEEK
+    // で計算した場合、week wrap 補正で tk が ±302400 s 範囲に折り返される
+    // → 結果は (ほぼ) 同一。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.6;
+    eph.ecc = 0.01;
+    eph.toe_s = 100000.0;
+    const a_pos = fkp_orbit.gpsSatEcef(eph, eph.toe_s + 100.0);
+    const b_pos = fkp_orbit.gpsSatEcef(eph, eph.toe_s + 100.0 + fkp_orbit.SECONDS_PER_WEEK);
+    try std.testing.expectApproxEqAbs(a_pos.x, b_pos.x, 1e-6);
+    try std.testing.expectApproxEqAbs(a_pos.y, b_pos.y, 1e-6);
+    try std.testing.expectApproxEqAbs(a_pos.z, b_pos.z, 1e-6);
+}
+
+test "fkp.orbit: satClockBiasGps polynomial term at dt=0 equals af0" {
+    var eph = zeroGpsEph();
+    eph.af0_s = 1.5e-4;
+    eph.af1_s_per_s = 1.0e-9;
+    eph.af2_s_per_s2 = 0;
+    eph.toc_s = 200.0;
+    // ecc=0 → 相対論項ゼロ、tgd_apply=false → tgd 影響なし
+    const bias = fkp_orbit.satClockBiasGps(eph, 200.0, 0.0, false);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5e-4), bias, 1e-15);
+}
+
+test "fkp.orbit: satClockBiasGps adds relativistic correction with non-zero ecc" {
+    var eph = zeroGpsEph();
+    eph.af0_s = 0;
+    eph.ecc = 0.01;
+    eph.sqrt_a_m = 5153.6;
+    const ek = 1.0; // arbitrary, sin(1)=0.841
+    const bias = fkp_orbit.satClockBiasGps(eph, 0.0, ek, false);
+    // F·e·sqrtA·sin(E) = -4.4428e-10 × 0.01 × 5153.6 × sin(1)
+    const expected = fkp_orbit.RELATIVISTIC_F * 0.01 * 5153.6 * @sin(@as(f64, 1.0));
+    try std.testing.expectApproxEqAbs(expected, bias, 1e-15);
+    try std.testing.expect(@abs(bias) > 1e-10); // 物理的に妥当な non-zero 値
+}
+
+test "fkp.orbit: satClockBiasGps subtracts tgd when tgd_apply=true" {
+    var eph = zeroGpsEph();
+    eph.tgd_s = 3e-9;
+    const bias_with = fkp_orbit.satClockBiasGps(eph, 0.0, 0.0, true);
+    const bias_without = fkp_orbit.satClockBiasGps(eph, 0.0, 0.0, false);
+    try std.testing.expectApproxEqAbs(@as(f64, -3e-9), bias_with - bias_without, 1e-18);
+}
+
+test "fkp.orbit: geometricRangeGps converges + plausible GPS τ (~67-87 ms)" {
+    // 衛星を toe=0, t_recv=0 で (a, 0, 0) 付近に置き、station を (R_earth, 0, 0)
+    // (= ECEF 上の北極/赤道交点付近) に置く。距離 ≈ a − R_earth ≈ 20.18 Mm、
+    // τ ≈ 67.3 ms。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.79;
+    // omdot - Ωe = -Ωe にしたいので omdot=0 のままで OK (toe=0 で omega=0)
+    const sta_ecef: [3]f64 = .{ 6378137.0, 0.0, 0.0 };
+    const gr = fkp_orbit.geometricRangeGps(eph, 0.0, sta_ecef);
+
+    // τ は 60-90 ms レンジ
+    try std.testing.expect(gr.tau_s > 0.06);
+    try std.testing.expect(gr.tau_s < 0.09);
+
+    // ρ = c × τ 整合性
+    try std.testing.expectApproxEqAbs(
+        fkp_orbit.C_LIGHT * gr.tau_s,
+        gr.rho_m,
+        1e-3,
+    );
+
+    // ρ は ~20 Mm (a - R_earth)
+    const a = eph.sqrt_a_m * eph.sqrt_a_m;
+    const expected_rho = a - 6378137.0;
+    try std.testing.expectApproxEqAbs(expected_rho, gr.rho_m, 5e5); // ±500 km の余裕
+}
+
+test "fkp.orbit: geometricRangeGps applies Earth rotation correction" {
+    // 同じ eph + station で τ=0 を仮定した raw sat ECEF と、light-time 計算結果を
+    // 比較し、|sat_corrected − sat_raw| が Ωe·τ·a ≈ 145 m スケールであることを確認。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.79;
+    eph.m0_rad = 1.0; // sat を x 軸から離す
+    const sta_ecef: [3]f64 = .{ 6378137.0, 0.0, 0.0 };
+    const gr = fkp_orbit.geometricRangeGps(eph, 0.0, sta_ecef);
+
+    // 受信時刻の "uncorrected" sat ECEF
+    const sat_raw = fkp_orbit.gpsSatEcef(eph, 0.0);
+
+    const dx = gr.sat_ecef_corrected[0] - sat_raw.x;
+    const dy = gr.sat_ecef_corrected[1] - sat_raw.y;
+    const dz = gr.sat_ecef_corrected[2] - sat_raw.z;
+    const drift = std.math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Ωe ≈ 7.29e-5、τ ≈ 0.07-0.08、a ≈ 2.66e7 → 補正量 ≈ 130-150 m スケール
+    try std.testing.expect(drift > 10.0);
+    try std.testing.expect(drift < 1000.0);
+}
+
+// ── Phase 7-3: extractPhase の lock_time/CNR ───────────────────────────────
+
+test "fkp: extractPhase exposes lock_time_indicator and cnr_db_hz" {
+    // 各 cell に distinct な lock_time / CNR raw を書き込み、PhaseObs に
+    // 正しく入ることを確認。
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var payload = [_]u8{0} ** 96;
+    var bw = fkp_bits.BitWriter.init(&payload);
+    writeMsm7TestHeader(&bw);
+    for (0..6) |_| bw.writeU(1, 1); // cell_mask all valid
+
+    // sat data: PRN1/2/3 で同じ rough_int + 異なる rough_mod
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 512);
+    bw.writeS(14, 0);
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 256);
+    bw.writeS(14, 0);
+    bw.writeU(8, 70);
+    bw.writeU(4, 0);
+    bw.writeU(10, 128);
+    bw.writeS(14, 0);
+
+    // signal data: 6 cell × 80 bit。lock_time / CNR は cell ごとに変える。
+    // raw lock_time = 10, 20, 30, 40, 50, 60
+    // raw CNR     = 640, 720, 560, 800, 480, 880  (× 0.0625 dB-Hz = 40, 45, 35, 50, 30, 55)
+    const cells = [_]struct { lt: u32, cnr: u32 }{
+        .{ .lt = 10, .cnr = 640 },
+        .{ .lt = 20, .cnr = 720 },
+        .{ .lt = 30, .cnr = 560 },
+        .{ .lt = 40, .cnr = 800 },
+        .{ .lt = 50, .cnr = 480 },
+        .{ .lt = 60, .cnr = 880 },
+    };
+    for (cells) |c| {
+        bw.writeS(20, 0); // fine_pseudo
+        bw.writeS(24, 1000); // fine_phase
+        bw.writeU(10, c.lt); // lock_time
+        bw.writeU(1, 0); // half-cycle
+        bw.writeU(10, c.cnr); // CNR
+        bw.writeS(15, 0); // fine phase rate
+    }
+
+    const obs = try fkp_msm7.extractPhase(alloc, &payload);
+    try std.testing.expectEqual(@as(usize, 6), obs.len);
+
+    // (si, gi) iteration order: (0,0) (0,1) (1,0) (1,1) (2,0) (2,1)
+    const expected_lt = [_]u16{ 10, 20, 30, 40, 50, 60 };
+    const expected_cnr_db = [_]f64{ 40.0, 45.0, 35.0, 50.0, 30.0, 55.0 };
+    for (obs, 0..) |o, i| {
+        try std.testing.expectEqual(expected_lt[i], o.lock_time_indicator);
+        try std.testing.expectApproxEqAbs(expected_cnr_db[i], o.cnr_db_hz, 1e-9);
+    }
+}
+
+// ── Phase 7-3: pickReferencePrn ────────────────────────────────────────────
+
+/// テスト用に PRN, L1/L2, CNR を指定して SatObsEx を作る。
+fn mkSatObsEx(prn: u8, l1: f64, l2: f64, cnr: f64) fkp_engine.SatObsEx {
+    return .{
+        .prn = prn,
+        .l1_m = l1,
+        .l2_m = l2,
+        .l1_cnr_db_hz = cnr,
+        .l2_cnr_db_hz = cnr,
+        .l1_lock_time = 100,
+        .l2_lock_time = 100,
+    };
+}
+
+/// テスト用に最低限の station coord (ECEF + lat/lon は dummy) を作る。
+fn mkStaCoord(id: u16, x: f64, y: f64, z: f64) fkp_msm7.StationCoord {
+    const ll = fkp_msm7.ecefToLatLon(x, y, z);
+    return .{
+        .ref_station_id = id,
+        .x = x,
+        .y = y,
+        .z = z,
+        .lat = ll[0],
+        .lon = ll[1],
+    };
+}
+
+test "fkp.engine: pickReferencePrn picks highest average CNR with eph available" {
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    // PRN 5 と 10 を eph に登録
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    try store.upsertGps(eph_5, 0);
+    var eph_10 = zeroGpsEph();
+    eph_10.prn = 10;
+    try store.upsertGps(eph_10, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 45.0), // 高 CNR
+    };
+    const obs_b = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 45.0),
+    };
+    const obs_c = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 45.0),
+    };
+
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, 4.0e6, 0.0, 4.5e6), .ecef = .{ 4.0e6, 0.0, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, 4.0e6, 1.0e5, 4.5e6), .ecef = .{ 4.0e6, 1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, 4.0e6, -1.0e5, 4.5e6), .ecef = .{ 4.0e6, -1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_c },
+    };
+
+    const ref = fkp_engine.pickReferencePrn(&stations, &store);
+    try std.testing.expectEqual(@as(?u8, 10), ref);
+}
+
+test "fkp.engine: pickReferencePrn skips PRN without ephemeris" {
+    // PRN 5 だけ eph 登録 → CNR が低くても 5 が選ばれる
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    try store.upsertGps(eph_5, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, 1e6, 1e6, 30.0),
+        mkSatObsEx(10, 1e6, 1e6, 50.0), // 高 CNR だが eph 無 → skip
+    };
+    const obs_b = obs_a;
+    const obs_c = obs_a;
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, 4.0e6, 0.0, 4.5e6), .ecef = .{ 4.0e6, 0.0, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, 4.0e6, 1.0e5, 4.5e6), .ecef = .{ 4.0e6, 1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, 4.0e6, -1.0e5, 4.5e6), .ecef = .{ 4.0e6, -1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_c },
+    };
+
+    const ref = fkp_engine.pickReferencePrn(&stations, &store);
+    try std.testing.expectEqual(@as(?u8, 5), ref);
+}
+
+test "fkp.engine: pickReferencePrn returns null when no common visible PRN" {
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    try store.upsertGps(eph_5, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{mkSatObsEx(5, 1e6, 1e6, 40.0)};
+    const obs_b = [_]fkp_engine.SatObsEx{}; // B には PRN 5 が無い
+    const obs_c = [_]fkp_engine.SatObsEx{mkSatObsEx(5, 1e6, 1e6, 40.0)};
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, 4.0e6, 0.0, 4.5e6), .ecef = .{ 4.0e6, 0.0, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, 4.0e6, 1.0e5, 4.5e6), .ecef = .{ 4.0e6, 1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, 4.0e6, -1.0e5, 4.5e6), .ecef = .{ 4.0e6, -1.0e5, 4.5e6 }, .t_recv_sow = 100.0, .obs = &obs_c },
+    };
+    const ref = fkp_engine.pickReferencePrn(&stations, &store);
+    try std.testing.expectEqual(@as(?u8, null), ref);
+}
+
+// ── Phase 7-3: computeFkpDd ────────────────────────────────────────────────
+
+/// 「観測値 L = ρ + c·dt + delta_m」で SatObsEx の l1_m/l2_m を構築するヘルパー。
+/// `delta_m` を 0 にすれば SD residual も 0 になり、DD = 0、FKP = 0 が期待値。
+fn synthPhase(
+    eph: fkp_eph.GpsEphemeris,
+    t_recv_sow: f64,
+    sta_ecef: [3]f64,
+    delta_m: f64,
+) f64 {
+    const gr = fkp_orbit.geometricRangeGps(eph, t_recv_sow, sta_ecef);
+    const dt = fkp_orbit.satClockBiasGps(eph, gr.t_emit_sow, gr.ecc_anomaly_rad, true);
+    return gr.rho_m + fkp_orbit.C_LIGHT * dt + delta_m;
+}
+
+test "fkp.engine: computeFkpDd returns ~zero FkpParam when SD residuals are all zero" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    // 2 PRN を eph に登録 (5 = ref、10 = non-ref)
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    eph_5.sqrt_a_m = 5153.6;
+    eph_5.m0_rad = 0.5;
+    try store.upsertGps(eph_5, 0);
+
+    var eph_10 = zeroGpsEph();
+    eph_10.prn = 10;
+    eph_10.sqrt_a_m = 5153.6;
+    eph_10.m0_rad = 1.2;
+    try store.upsertGps(eph_10, 0);
+
+    // 3 局: 受信機を WGS-84 楕円体上の妥当な位置に置く
+    const ecef_a: [3]f64 = .{ 4.0e6, 0.0, 4.7e6 };
+    const ecef_b: [3]f64 = .{ 4.0e6, 1.0e5, 4.7e6 };
+    const ecef_c: [3]f64 = .{ 4.0e6, -1.0e5, 4.7e6 };
+    const t: f64 = 100.0;
+
+    // delta=0 で全観測値を合成
+    const l1_5_a = synthPhase(eph_5, t, ecef_a, 0);
+    const l1_5_b = synthPhase(eph_5, t, ecef_b, 0);
+    const l1_5_c = synthPhase(eph_5, t, ecef_c, 0);
+    const l1_10_a = synthPhase(eph_10, t, ecef_a, 0);
+    const l1_10_b = synthPhase(eph_10, t, ecef_b, 0);
+    const l1_10_c = synthPhase(eph_10, t, ecef_c, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, l1_5_a, l1_5_a, 40.0),
+        mkSatObsEx(10, l1_10_a, l1_10_a, 35.0),
+    };
+    const obs_b = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, l1_5_b, l1_5_b, 40.0),
+        mkSatObsEx(10, l1_10_b, l1_10_b, 35.0),
+    };
+    const obs_c = [_]fkp_engine.SatObsEx{
+        mkSatObsEx(5, l1_5_c, l1_5_c, 40.0),
+        mkSatObsEx(10, l1_10_c, l1_10_c, 35.0),
+    };
+
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, ecef_a[0], ecef_a[1], ecef_a[2]), .ecef = ecef_a, .t_recv_sow = t, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, ecef_b[0], ecef_b[1], ecef_b[2]), .ecef = ecef_b, .t_recv_sow = t, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, ecef_c[0], ecef_c[1], ecef_c[2]), .ecef = ecef_c, .t_recv_sow = t, .obs = &obs_c },
+    };
+
+    // ref_prn=5 を明示、PRN 10 だけ FkpParam が出る (≈ 0)
+    const fkp = try fkp_engine.computeFkpDd(alloc, &stations, &store, 5, .{
+        .max_magnitude = 1.0, // 1 m/rad 以下を期待
+    });
+    try std.testing.expectEqual(@as(usize, 1), fkp.len);
+    try std.testing.expectEqual(@as(u8, 10), fkp[0].prn);
+    // SD residual が numeric noise (~1e-7 m) なので FKP も小さい値
+    try std.testing.expect(@abs(fkp[0].n_0) < 1e-3);
+    try std.testing.expect(@abs(fkp[0].e_0) < 1e-3);
+    try std.testing.expect(@abs(fkp[0].n_i) < 1e-3);
+    try std.testing.expect(@abs(fkp[0].e_i) < 1e-3);
+}
+
+test "fkp.engine: computeFkpDd skips ref PRN (DD = 0 by construction)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var store = fkp_eph.EphemerisStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    var eph_5 = zeroGpsEph();
+    eph_5.prn = 5;
+    eph_5.sqrt_a_m = 5153.6;
+    try store.upsertGps(eph_5, 0);
+
+    const ecef_a: [3]f64 = .{ 4.0e6, 0.0, 4.7e6 };
+    const ecef_b: [3]f64 = .{ 4.0e6, 1.0e5, 4.7e6 };
+    const ecef_c: [3]f64 = .{ 4.0e6, -1.0e5, 4.7e6 };
+    const t: f64 = 100.0;
+    const l1_a = synthPhase(eph_5, t, ecef_a, 0);
+    const l1_b = synthPhase(eph_5, t, ecef_b, 0);
+    const l1_c = synthPhase(eph_5, t, ecef_c, 0);
+
+    const obs_a = [_]fkp_engine.SatObsEx{mkSatObsEx(5, l1_a, l1_a, 40.0)};
+    const obs_b = [_]fkp_engine.SatObsEx{mkSatObsEx(5, l1_b, l1_b, 40.0)};
+    const obs_c = [_]fkp_engine.SatObsEx{mkSatObsEx(5, l1_c, l1_c, 40.0)};
+    const stations = [_]fkp_engine.StationObsEx{
+        .{ .coord = mkStaCoord(1, ecef_a[0], ecef_a[1], ecef_a[2]), .ecef = ecef_a, .t_recv_sow = t, .obs = &obs_a },
+        .{ .coord = mkStaCoord(2, ecef_b[0], ecef_b[1], ecef_b[2]), .ecef = ecef_b, .t_recv_sow = t, .obs = &obs_b },
+        .{ .coord = mkStaCoord(3, ecef_c[0], ecef_c[1], ecef_c[2]), .ecef = ecef_c, .t_recv_sow = t, .obs = &obs_c },
+    };
+
+    // ref=5、non-ref が無い → 空のリスト
+    const fkp = try fkp_engine.computeFkpDd(alloc, &stations, &store, 5, .{});
+    try std.testing.expectEqual(@as(usize, 0), fkp.len);
+}
+
+test "fkp.engine: groupPhaseObsEx propagates cnr + lock_time per band" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const phase_list = [_]fkp_msm7.PhaseObs{
+        .{ .prn = 5, .phase_m = 21000000.5, .freq_hz = 1575.42e6, .band = .l1, .lock_time_indicator = 100, .cnr_db_hz = 45.0 },
+        .{ .prn = 5, .phase_m = 16700000.2, .freq_hz = 1227.60e6, .band = .l2, .lock_time_indicator = 90, .cnr_db_hz = 38.5 },
+    };
+    const sat_obs = try fkp_engine.groupPhaseObsEx(alloc, &phase_list);
+    try std.testing.expectEqual(@as(usize, 1), sat_obs.len);
+    try std.testing.expectEqual(@as(u8, 5), sat_obs[0].prn);
+    try std.testing.expectApproxEqAbs(@as(f64, 21000000.5), sat_obs[0].l1_m.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 16700000.2), sat_obs[0].l2_m.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 45.0), sat_obs[0].l1_cnr_db_hz.?, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 38.5), sat_obs[0].l2_cnr_db_hz.?, 1e-9);
+    try std.testing.expectEqual(@as(u16, 100), sat_obs[0].l1_lock_time.?);
+    try std.testing.expectEqual(@as(u16, 90), sat_obs[0].l2_lock_time.?);
 }

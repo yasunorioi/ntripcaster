@@ -20,6 +20,8 @@ pub const fkp = struct {
     pub const msm7 = @import("fkp/msm7.zig");
     pub const engine = @import("fkp/engine.zig");
     pub const type59 = @import("fkp/type59.zig");
+    pub const ephemeris = @import("fkp/ephemeris.zig");
+    pub const orbit = @import("fkp/orbit.zig");
     pub const upstream = @import("fkp/upstream.zig");
     pub const runtime = @import("fkp/runtime.zig");
     pub const vrs = @import("fkp/vrs.zig");
@@ -49,6 +51,8 @@ comptime {
     _ = fkp.msm7;
     _ = fkp.engine;
     _ = fkp.type59;
+    _ = fkp.ephemeris;
+    _ = fkp.orbit;
     _ = fkp.upstream;
     _ = fkp.runtime;
     _ = fkp.vrs;
