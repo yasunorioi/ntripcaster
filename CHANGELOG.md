@@ -216,6 +216,44 @@ magnitude 再計測。詳細は `docs/phase7-4-research.md` § 「次セッシ�
   `computePhaseDelta` に未実装と判明。Phase 7-5 で追加。Phase 7-3 までの
   L1 のみ補正では無害。
 
+### Phase 7-3.5 完了 + RTKLIB 実機検証 (2026-05-18)
+
+`phase7-3.5-msm7-fix` ブランチで MSM7 parser 2 バグ (factor 4 scale + cell-major
+layout) を修正、master へマージ (`fd28d5d`)。詳細: `99c0ceb` commit body と
+`docs/msm7-scale-validation.md`。
+
+実機検証 (`docs/phase7-3.5-verification.md`):
+
+- **段階 1 (convbin で binary cross-decode、成功)**: ntripcaster `/VRS_PARIS`
+  出力を RTKLIB convbin で RINEX に変換、`R04 pseudo=22,860,052 m /
+  phase=122,414,485 cycles` (cycle×λ ≈ pseudo) で物理整合確認。CRC 通過、
+  59 epoch × 30 衛星すべて出力。修正前の cell-major / 2^-29 ms 実装では
+  convbin が obs body を出せなかったはずで、**Phase 7-3.5 が RTKLIB 互換
+  であることの確証**。
+
+- **段階 2 (rtkrcv で RTK fix 試行、不成立 → 別問題の確証)**: rover=centipede
+  CDFX (~22km baseline)、base=ntripcaster `/VRS_PARIS` で `rtkrcv -s` 起動、
+  14 分間観測。**858 epoch 全 Q=5 (single point), ratio=0.0** で LAMBDA 試行
+  すらなし。
+
+  これは Phase 7-3.5 修正の問題ではなく、**Phase 5b/6a の VRS+FKP 設計の
+  根本問題が露呈**:
+  - VRS の inject 1005 は rover 近傍 (48.72, 2.28) を申告
+  - MSM7 観測値は元 CROI 物理基準局のもの、ref_id だけ書き換え
+  - `applyPhaseCorrection` は empty deltas で no-op (Phase 6a 全 PRN 棄却)
+  - → rtkrcv が DD 計算するときに「VRS_center で取れた MSM7」と解釈するが
+    実は CROI 位置の観測 → DD 残差に km scale baseline 差が乗る → ratio
+    test 通らず → fix 立たず
+
+  この結果は **Phase 7-4 (LAMBDA) + Phase 7-5 (runtime 配線) の論理的必然性
+  を改めて確認**するもの。Phase 7-5 で computeFkpDd 出力を applyPhaseCorrection
+  delta に流せば、rover には「VRS_center 位置で取れた仮想観測値」が届き、
+  DD 残差が cm scale になって LAMBDA fix 可能になる見込み。
+
+新規 build: macOS arm64 で RTKLIB の app/{rtkrcv,str2str,convbin}/gcc/makefile を
+`-std=gnu99 -D_DARWIN_C_SOURCE` で patch + `LDLIBS=-lm -lpthread` で build 成功
+(/tmp/rtklib-build/ に配置、commit 対象外)。
+
 ---
 
 ## [0.3.0] — 2026-05-15 — FKP runtime wire-up (Phase 3)
