@@ -305,7 +305,7 @@ fn sendBadRequest(stream: std.net.Stream) void {
     stream.writeAll("HTTP/1.0 400 Bad Request\r\n\r\n") catch {};
 }
 
-fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState) void {
+fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState, is_v2: bool, keep_alive: bool) void {
     var arena = std.heap.ArenaAllocator.init(state.alloc);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -359,18 +359,34 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState) void {
         }
     }
 
-    const resp = sourcetable_mod.buildResponse(
-        alloc,
-        body,
-        state.config.server_name,
-        entries.items,
-    ) catch {
-        sendBadRequest(stream);
-        return;
-    };
+    const resp = if (is_v2)
+        sourcetable_mod.buildResponseV2(alloc, body, state.config.server_name, entries.items, keep_alive) catch {
+            sendBadRequest(stream);
+            return;
+        }
+    else
+        sourcetable_mod.buildResponse(alloc, body, state.config.server_name, entries.items) catch {
+            sendBadRequest(stream);
+            return;
+        };
 
     stream.writeAll(resp) catch {};
 }
+
+/// SO_RCVTIMEO を設定する（keep-alive アイドル時間の上限）。
+fn setKeepAliveTimeout(stream: std.net.Stream, secs: u32) !void {
+    const tv = std.posix.timeval{ .sec = @intCast(secs), .usec = 0 };
+    try std.posix.setsockopt(
+        stream.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVTIMEO,
+        std.mem.asBytes(&tv),
+    );
+}
+
+/// V2 client-side keep-alive の上限（1 コネクション内のリクエスト最大数とアイドル秒数）。
+const MAX_REQUESTS_PER_CONN: u32 = 20;
+const KEEP_ALIVE_IDLE_SECS: u32 = 30;
 
 fn handleConnection(args: ConnArgs) void {
     _ = args.state.active_handlers.fetchAdd(1, .seq_cst);
@@ -384,19 +400,43 @@ fn handleConnection(args: ConnArgs) void {
         return;
     }
 
-    var header_buf: [4096]u8 = undefined;
-    const header_len = readHeader(args.stream, &header_buf) catch {
-        sendBadRequest(args.stream);
-        return;
-    };
-    const header = header_buf[0..header_len];
+    var request_count: u32 = 0;
+    while (request_count < MAX_REQUESTS_PER_CONN) : (request_count += 1) {
+        // 2 回目以降は idle 読み取りタイムアウトを設定（DOS 対策）。
+        if (request_count == 1) {
+            setKeepAliveTimeout(args.stream, KEEP_ALIVE_IDLE_SECS) catch {};
+        }
 
-    const req = protocol.parseRequest(header);
-    switch (req) {
-        .source_login => |sl| source_mod.handleSource(args.stream, args.state, sl, args.peer_addr),
-        .client_get => |cg| client_mod.handleClient(args.stream, args.state, cg, args.peer_addr),
-        .sourcetable_get => sendSourcetableResponse(args.stream, args.state),
-        .invalid => sendBadRequest(args.stream),
+        var header_buf: [4096]u8 = undefined;
+        const header_len = readHeader(args.stream, &header_buf) catch {
+            if (request_count == 0) sendBadRequest(args.stream);
+            return;
+        };
+        const header = header_buf[0..header_len];
+
+        const req = protocol.parseRequest(header);
+        switch (req) {
+            .source_login => |sl| {
+                // source は長時間ストリーミング — keep-alive 非対応、即終了
+                source_mod.handleSource(args.stream, args.state, sl, args.peer_addr);
+                return;
+            },
+            .client_get => |cg| {
+                // データストリームも長時間 — keep-alive 非対応、即終了
+                client_mod.handleClient(args.stream, args.state, cg, args.peer_addr);
+                return;
+            },
+            .sourcetable_get => |sg| {
+                sendSourcetableResponse(args.stream, args.state, sg.is_v2, sg.keep_alive);
+                // V1 / V2 で keep-alive 指定なしなら終了
+                if (!sg.is_v2 or !sg.keep_alive) return;
+                // V2 + keep-alive: 次リクエストを待つためループ継続
+            },
+            .invalid => {
+                sendBadRequest(args.stream);
+                return;
+            },
+        }
     }
 }
 

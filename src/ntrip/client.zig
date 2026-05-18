@@ -3,17 +3,20 @@
 //! 原典 client.c の client_login() / greet_client() / source_write_to_client() を
 //! Zig で再実装。
 //!
-//! クライアントは "ICY 200 OK" の後、ソースのリングバッファからRTCMデータを受信する。
+//! V1 クライアント: "ICY 200 OK" 応答後、リングバッファから RTCM を生バイト送信。
+//! V2 クライアント: "HTTP/1.1 200 OK" + Transfer-Encoding: chunked 応答後、
+//! RTCM フレームを chunked encoding で送信。
+//!
 //! ソース切断またはバッファオーバーランで接続を切断する。
 //!
 //! Client 構造体は接続中クライアントを ServerState から追跡するためのレコード。
-//! Phase C 時点では id と mount のみ。Phase A で telemetry (peer / bytes / 時刻) を追加。
 
 const std = @import("std");
 const server = @import("../server.zig");
 const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
+const sourcetable = @import("sourcetable.zig");
 
 /// 接続中の NTRIP クライアント (rover) を表す。
 pub const Client = struct {
@@ -58,12 +61,57 @@ pub const Client = struct {
     }
 };
 
+/// HTTP エラー応答を V1 / V2 で出し分ける。
+/// V1: HTTP/1.0、V2: HTTP/1.1 + Server ヘッダー。
+fn writeErrorResponse(stream: std.net.Stream, is_v2: bool, status_line: []const u8, extra_headers: []const u8) void {
+    const http_ver = if (is_v2) "HTTP/1.1 " else "HTTP/1.0 ";
+    const iov: [5][]const u8 = .{
+        http_ver,
+        status_line,
+        "\r\n",
+        extra_headers,
+        "\r\n",
+    };
+    for (iov) |s| {
+        stream.writeAll(s) catch return;
+    }
+}
+
+/// V2 クライアントへのストリーム開始ヘッダー（HTTP/1.1 200 OK + chunked）。
+fn writeV2StreamHeaders(stream: std.net.Stream) !void {
+    var buf: [256]u8 = undefined;
+    const headers = try std.fmt.bufPrint(&buf,
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: NTRIP NtripCaster/{s}\r\n" ++
+        "Ntrip-Version: Ntrip/2.0\r\n" ++
+        "Cache-Control: no-store, no-cache, max-age=0\r\n" ++
+        "Pragma: no-cache\r\n" ++
+        "Connection: close\r\n" ++
+        "Content-Type: gnss/data\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "\r\n",
+        .{sourcetable.CASTER_VERSION},
+    );
+    try stream.writeAll(headers);
+}
+
+/// HTTP/1.1 chunked encoding でデータを 1 チャンク送信する。
+/// 形式: "<hex-size>\r\n<data>\r\n"
+fn writeChunked(stream: std.net.Stream, data: []const u8) !void {
+    if (data.len == 0) return;
+    var size_buf: [24]u8 = undefined;
+    const size_line = try std.fmt.bufPrint(&size_buf, "{x}\r\n", .{data.len});
+    try stream.writeAll(size_line);
+    try stream.writeAll(data);
+    try stream.writeAll("\r\n");
+}
+
 /// クライアント接続のエントリポイント。
 ///
 /// 処理フロー:
 ///   1. Basic認証 or オープンマウント判定
 ///   2. マウント探索（ソースが存在しない場合は 404）
-///   3. "ICY 200 OK\r\n\r\n" 送信
+///   3. V1: "ICY 200 OK"  /  V2: "HTTP/1.1 200 OK" + chunked ヘッダー
 ///   4. Client 登録 → RingBuffer からデータを読み取り → クライアントに送信
 ///   5. ソース切断 / バッファオーバーラン / 送信エラーで接続終了
 pub fn handleClient(
@@ -82,7 +130,7 @@ pub fn handleClient(
 
     // 1. ソース探索（アクティブなソースがなければ 404）
     const src = state.getSource(get.mount) orelse {
-        stream.writeAll("HTTP/1.0 404 Not Found\r\n\r\n") catch {};
+        writeErrorResponse(stream, get.is_v2, "404 Not Found", "");
         state.logger.warn("client rejected: mount {s} not found", .{get.mount});
         return;
     };
@@ -104,24 +152,24 @@ pub fn handleClient(
     }
 
     if (!auth_ok) {
-        stream.writeAll(
-            "HTTP/1.0 401 Unauthorized\r\n" ++
-                "WWW-Authenticate: Basic realm=\"NtripCaster\"\r\n" ++
-                "\r\n",
-        ) catch {};
+        writeErrorResponse(stream, get.is_v2, "401 Unauthorized", "WWW-Authenticate: Basic realm=\"NtripCaster\"\r\n");
         state.logger.warn("client rejected: unauthorized for mount {s}", .{get.mount});
         return;
     }
 
     // 3. ソースあたりクライアント数上限チェック
     if (src.client_count.load(.seq_cst) >= state.config.max_clients_per_source) {
-        stream.writeAll("HTTP/1.0 503 Service Unavailable\r\n\r\n") catch {};
+        writeErrorResponse(stream, get.is_v2, "503 Service Unavailable", "");
         state.logger.warn("client rejected: max_clients_per_source ({d}) reached for mount {s}", .{ state.config.max_clients_per_source, get.mount });
         return;
     }
 
-    // 4. ICY 200 OK 応答
-    stream.writeAll("ICY 200 OK\r\n\r\n") catch return;
+    // 4. 成功応答（V1 は ICY、V2 は HTTP/1.1 + chunked ヘッダー）
+    if (get.is_v2) {
+        writeV2StreamHeaders(stream) catch return;
+    } else {
+        stream.writeAll("ICY 200 OK\r\n\r\n") catch return;
+    }
 
     // 5. Client 登録
     const id = state.nextClientId();
@@ -139,17 +187,22 @@ pub fn handleClient(
         client.destroy();
     }
 
-    state.logger.info("client connected: id={d} mount={s}", .{ id, get.mount });
+    state.logger.info("client connected: id={d} mount={s} v2={}", .{ id, get.mount, get.is_v2 });
 
     // 6. データ配信ループ
-    clientLoop(stream, src, client);
+    clientLoop(stream, src, client, get.is_v2);
+
+    // V2 は終端 chunk "0\r\n\r\n" を送って streamed body を閉じる（best-effort）
+    if (get.is_v2) {
+        stream.writeAll("0\r\n\r\n") catch {};
+    }
 
     state.logger.info("client disconnected: id={d} mount={s}", .{ id, get.mount });
 }
 
 /// リングバッファからデータを読み取ってクライアントに送信するループ。
 /// ソース切断 / バッファオーバーラン / 送信エラーで終了する。
-fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client) void {
+fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v2: bool) void {
     _ = src.client_count.fetchAdd(1, .seq_cst);
     defer _ = src.client_count.fetchSub(1, .seq_cst);
 
@@ -163,7 +216,11 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client) void
         };
 
         if (result) |r| {
-            stream.writeAll(buf[0..r.len]) catch break;
+            if (is_v2) {
+                writeChunked(stream, buf[0..r.len]) catch break;
+            } else {
+                stream.writeAll(buf[0..r.len]) catch break;
+            }
             client.stat_lock.lock();
             client.bytes_out += r.len;
             client.stat_lock.unlock();

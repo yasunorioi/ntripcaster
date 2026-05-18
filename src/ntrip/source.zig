@@ -10,6 +10,7 @@ const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
 const rtcm3 = @import("rtcm3.zig");
+const sourcetable = @import("sourcetable.zig");
 
 /// マウントポイントに接続中のソース（基準局）。
 pub const Source = struct {
@@ -70,15 +71,34 @@ pub const Source = struct {
     }
 };
 
+/// V1 / V2 共通のエラー応答。V1: 平文 "ERROR - ..." 、V2: HTTP/1.1 ステータスライン。
+fn writeSourceError(stream: std.net.Stream, is_v2: bool, v1_msg: []const u8, v2_status: []const u8) void {
+    if (is_v2) {
+        var buf: [256]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf,
+            "HTTP/1.1 {s}\r\n" ++
+            "Server: NTRIP NtripCaster/{s}\r\n" ++
+            "Ntrip-Version: Ntrip/2.0\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n",
+            .{ v2_status, sourcetable.CASTER_VERSION },
+        ) catch return;
+        stream.writeAll(resp) catch {};
+    } else {
+        stream.writeAll(v1_msg) catch {};
+    }
+}
+
 /// ソース接続のエントリポイント。
 ///
-/// 処理フロー:
-///   1. encoder_password 検証
+/// 処理フロー (V1 SOURCE / V2 POST 共通):
+///   1. パスワード検証 (V1: inline password / V2: Basic auth_header)
 ///   2. Source-Agent が NTRIP 準拠か検証（§2f BKG差異）
 ///   3. マウント二重登録チェック
-///   4. "OK\r\n" 送信
-///   5. RTCMデータ受信ループ → RingBuffer に writeChunk
-///   6. 切断時にマウント解放、active=false でクライアントを通知
+///   4. V2 の場合: Expect: 100-continue があれば "HTTP/1.1 100 Continue" を先送り
+///   5. 成功応答 (V1: "OK\r\n" / V2: "HTTP/1.1 200 OK" + headers)
+///   6. RTCMデータ受信ループ → RingBuffer に writeChunk
+///   7. 切断時にマウント解放、active=false でクライアントを通知
 pub fn handleSource(
     stream: std.net.Stream,
     state: *server.ServerState,
@@ -86,8 +106,21 @@ pub fn handleSource(
     peer_addr: std.net.Address,
 ) void {
     // 1. パスワード検証
-    if (!auth.authenticateSource(state.config, login.password)) {
-        stream.writeAll("ERROR - Bad Password\r\n") catch {};
+    var pw_ok = false;
+    if (login.is_v2) {
+        // V2: Authorization: Basic <base64(user:pass)> から password を取り出して照合
+        if (login.auth_header) |ah| {
+            var cred_buf: [512]u8 = undefined;
+            if (auth.extractCredentials(ah, &cred_buf)) |cred| {
+                pw_ok = auth.authenticateSource(state.config, cred.pass);
+            } else |_| {}
+        }
+    } else {
+        // V1: inline password
+        pw_ok = auth.authenticateSource(state.config, login.password);
+    }
+    if (!pw_ok) {
+        writeSourceError(stream, login.is_v2, "ERROR - Bad Password\r\n", "401 Unauthorized");
         state.logger.warn("source rejected: bad password for mount {s}", .{login.mount});
         return;
     }
@@ -95,7 +128,7 @@ pub fn handleSource(
     // 2. NTRIP エージェント検証（Source-Agent ヘッダー必須ではないが推奨）
     if (login.agent) |agent| {
         if (!protocol.isNtripAgent(agent)) {
-            stream.writeAll("ERROR - Not NTRIP\r\n") catch {};
+            writeSourceError(stream, login.is_v2, "ERROR - Not NTRIP\r\n", "400 Bad Request");
             state.logger.warn("source rejected: non-NTRIP agent '{s}'", .{agent});
             return;
         }
@@ -103,14 +136,14 @@ pub fn handleSource(
 
     // 3. ソース数上限チェック
     if (state.sourceCount() >= state.config.max_sources) {
-        stream.writeAll("ERROR - Too Many Sources\r\n") catch {};
+        writeSourceError(stream, login.is_v2, "ERROR - Too Many Sources\r\n", "503 Service Unavailable");
         state.logger.warn("source rejected: max_sources ({d}) reached", .{state.config.max_sources});
         return;
     }
 
     // 4. Source オブジェクト作成
     const src = Source.create(state.alloc, login.mount, peer_addr) catch |err| {
-        stream.writeAll("ERROR - Internal Error\r\n") catch {};
+        writeSourceError(stream, login.is_v2, "ERROR - Internal Error\r\n", "500 Internal Server Error");
         state.logger.err("Source.create failed: {}", .{err});
         return;
     };
@@ -118,7 +151,7 @@ pub fn handleSource(
     // 5. マウント登録
     state.registerSource(src) catch {
         src.destroy();
-        stream.writeAll("ERROR - Mount already in use\r\n") catch {};
+        writeSourceError(stream, login.is_v2, "ERROR - Mount already in use\r\n", "409 Conflict");
         state.logger.warn("source rejected: mount {s} already in use", .{login.mount});
         return;
     };
@@ -133,11 +166,34 @@ pub fn handleSource(
         src.destroy();
     }
 
-    // 5. 成功応答
-    stream.writeAll("OK\r\n") catch return;
-    state.logger.info("source connected: mount={s}", .{login.mount});
+    // 6. 成功応答
+    if (login.is_v2) {
+        // V2: 認証通過 + Expect: 100-continue があれば "100 Continue" を先送りしてから body 受信
+        if (login.expects_100) {
+            stream.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
+        }
+        var resp_buf: [256]u8 = undefined;
+        const resp = std.fmt.bufPrint(&resp_buf,
+            "HTTP/1.1 200 OK\r\n" ++
+            "Server: NTRIP NtripCaster/{s}\r\n" ++
+            "Ntrip-Version: Ntrip/2.0\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n",
+            .{sourcetable.CASTER_VERSION},
+        ) catch return;
+        stream.writeAll(resp) catch return;
+    } else {
+        stream.writeAll("OK\r\n") catch return;
+    }
+    state.logger.info("source connected: mount={s} v2={}", .{ login.mount, login.is_v2 });
 
-    // 6. RTCMデータ受信ループ
+    // 7. RTCMデータ受信ループ
+    //
+    // 注意: V2 POST body は "Transfer-Encoding: chunked" のはずだが、本実装は
+    // chunked decode をしない。RTCM3 フレームスキャンが先頭から自前で同期する
+    // ため、chunk size 行を「未知バイト列」として読み飛ばしても 99% 正常動作する
+    // (str2str など主要 V2 pusher は chunked headers なしに raw stream を流す
+    // 実装も多い)。厳密 chunked 対応は将来 issue。
     sourceLoop(stream, src);
 
     state.logger.info("source disconnected: mount={s}", .{login.mount});

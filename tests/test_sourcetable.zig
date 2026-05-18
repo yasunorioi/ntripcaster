@@ -196,3 +196,64 @@ test "buildResponse: static body and dynamic sources both appear" {
     const header_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return error.NoHeaderEnd;
     try std.testing.expectEqual(cl, resp[header_end + 4 ..].len);
 }
+
+// ── buildResponseV2 (NTRIP v2) ────────────────────────────────────────────────
+
+test "buildResponseV2: starts with HTTP/1.1 200 OK" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &.{}, false);
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+}
+
+test "buildResponseV2: includes Ntrip-Version and gnss/sourcetable Content-Type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &.{}, false);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Ntrip-Version: Ntrip/2.0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Type: gnss/sourcetable; charset=UTF-8\r\n") != null);
+}
+
+test "buildResponseV2: Connection: close when keep_alive=false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &.{}, false);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Connection: close\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Connection: keep-alive\r\n") == null);
+}
+
+test "buildResponseV2: Connection: keep-alive when keep_alive=true" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &.{}, true);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Connection: keep-alive\r\n") != null);
+}
+
+test "buildResponseV2: Content-Length matches body length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const sources = [_]sourcetable.SourceEntry{
+        .{ .mount = "M1", .format = "RTCM 3.2", .format_details = "1005(1)" },
+    };
+    const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &sources, false);
+    const cl_prefix = "Content-Length: ";
+    const cl_start = std.mem.indexOf(u8, resp, cl_prefix) orelse return error.NoContentLength;
+    const cl_vs = cl_start + cl_prefix.len;
+    const cl_ve = std.mem.indexOf(u8, resp[cl_vs..], "\r\n") orelse return error.NoCRLF;
+    const cl = try std.fmt.parseInt(usize, resp[cl_vs .. cl_vs + cl_ve], 10);
+    const header_end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return error.NoHeaderEnd;
+    try std.testing.expectEqual(cl, resp[header_end + 4 ..].len);
+}
+
+test "buildResponseV2: body ends with ENDSOURCETABLE" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &.{}, false);
+    try std.testing.expect(std.mem.endsWith(u8, resp, "ENDSOURCETABLE\r\n"));
+}

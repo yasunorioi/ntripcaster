@@ -10,10 +10,20 @@
 //!   \r\n
 //!   {sourcetable.dat 内容}
 //!   ENDSOURCETABLE\r\n
+//!
+//! NTRIP v2 Sourcetable レスポンス形式:
+//!   HTTP/1.1 200 OK\r\n
+//!   Server: NTRIP NtripCaster/<version>\r\n
+//!   Ntrip-Version: Ntrip/2.0\r\n
+//!   Content-Type: gnss/sourcetable; charset=UTF-8\r\n
+//!   Content-Length: {size}\r\n
+//!   Connection: {close|keep-alive}\r\n
+//!   \r\n
+//!   {body}
 
 const std = @import("std");
 
-pub const CASTER_VERSION = "0.2.0";
+pub const CASTER_VERSION = "0.5.0";
 
 /// 動的ソースの STR 行生成に使う情報
 pub const SourceEntry = struct {
@@ -81,6 +91,60 @@ pub fn buildResponse(
             "\r\n" ++
             "{s}",
         .{ CASTER_VERSION, full_body.items.len, full_body.items },
+    );
+}
+
+/// NTRIP v2 (HTTP/1.1) 用の sourcetable レスポンスを生成する。
+///
+/// 引数は `buildResponse` (v1) と同じだが、レスポンスヘッダーが HTTP/1.1 形式になり
+/// `Ntrip-Version: Ntrip/2.0` と `Content-Type: gnss/sourcetable; charset=UTF-8`
+/// を付与する。`keep_alive` で `Connection` ヘッダーを切り替え。
+pub fn buildResponseV2(
+    allocator: std.mem.Allocator,
+    body: []const u8,
+    server_name: []const u8,
+    dynamic_sources: []const SourceEntry,
+    keep_alive: bool,
+) ![]u8 {
+    _ = server_name;
+
+    var full_body = std.ArrayList(u8){};
+    defer full_body.deinit(allocator);
+
+    if (body.len > 0) {
+        try full_body.appendSlice(allocator, body);
+        if (!std.mem.endsWith(u8, body, "\n")) {
+            try full_body.appendSlice(allocator, "\r\n");
+        }
+    }
+
+    for (dynamic_sources) |entry| {
+        try full_body.appendSlice(allocator, "STR;");
+        try full_body.appendSlice(allocator, entry.mount);
+        try full_body.appendSlice(allocator, ";");
+        try full_body.appendSlice(allocator, entry.mount);
+        try full_body.appendSlice(allocator, ";");
+        try full_body.appendSlice(allocator, entry.format);
+        try full_body.appendSlice(allocator, ";");
+        try full_body.appendSlice(allocator, entry.format_details);
+        try full_body.appendSlice(allocator, ";;;;;;;;;N;N;0;;\r\n");
+    }
+
+    try full_body.appendSlice(allocator, "ENDSOURCETABLE\r\n");
+
+    const connection = if (keep_alive) "keep-alive" else "close";
+
+    return std.fmt.allocPrint(
+        allocator,
+        "HTTP/1.1 200 OK\r\n" ++
+            "Server: NTRIP NtripCaster/{s}\r\n" ++
+            "Ntrip-Version: Ntrip/2.0\r\n" ++
+            "Content-Type: gnss/sourcetable; charset=UTF-8\r\n" ++
+            "Content-Length: {d}\r\n" ++
+            "Connection: {s}\r\n" ++
+            "\r\n" ++
+            "{s}",
+        .{ CASTER_VERSION, full_body.items.len, connection, full_body.items },
     );
 }
 

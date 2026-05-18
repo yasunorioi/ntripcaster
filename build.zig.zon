@@ -1,7 +1,7 @@
 .{
     .name = .ntripcaster,
     .fingerprint = 0xcddfcadd563310fb,
-    .version = "0.2.1",
+    .version = "0.5.0",
     .minimum_zig_version = "0.15.0",
     .dependencies = .{},
     .paths = .{

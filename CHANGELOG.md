@@ -4,6 +4,59 @@ All notable changes to this project are documented here.
 
 ---
 
+## [0.5.0] — 2026-05-18 — NTRIP v2 protocol support
+
+NTRIP v2 (HTTP/1.1 ベース) のプロトコル対応を追加。v1 (ICY 200 OK) 互換は維持。
+本リリースはプロトコル層のみの対応で、ユーザ管理 / Digest auth / HTTPS は
+意図的にスコープ外。
+
+### 追加機能
+
+- **V2 client GET**: `Ntrip-Version: Ntrip/2.0` ヘッダー検出時、`HTTP/1.1 200 OK`
+  + `Content-Type: gnss/data` + `Transfer-Encoding: chunked` で応答。
+  RTCM データを chunked encoding でフレーム送信し、接続終了時に終端 chunk
+  `0\r\n\r\n` を送出。
+- **V2 source POST**: `POST /<mount> HTTP/1.1` + `Authorization: Basic ...`
+  形式の source push を受理。認証通過時は `HTTP/1.1 200 OK`、不正パスワードは
+  `HTTP/1.1 401 Unauthorized` を返す。
+- **Expect: 100-continue** 対応: V2 POST source に Expect ヘッダーがあれば
+  `HTTP/1.1 100 Continue` を先送りしてから body 受信を開始。
+- **V2 sourcetable**: V2 クライアントからの `GET /` には `HTTP/1.1 200 OK`
+  + `Content-Type: gnss/sourcetable; charset=UTF-8` + `Ntrip-Version: Ntrip/2.0`
+  で応答。
+- **Client-side keep-alive**: V2 sourcetable に対する `Connection: keep-alive`
+  を受理。同一 TCP コネクションで最大 20 リクエスト、idle 30 秒の上限。
+  データストリーム (long-running) と source push は keep-alive 非対応（仕様上意味薄）。
+- **V2 エラー応答**: 404/401/503/400/409 など、すべての V2 エラー応答を
+  `HTTP/1.1 <status>` + `Server` + `Ntrip-Version` ヘッダー付きで統一。
+
+### 変更点 (互換)
+
+- `protocol.zig`: `NtripRequest.sourcetable_get` が `void` から構造体に変更
+  （`is_v2`, `keep_alive` フィールド付加）。`SourceLogin` / `ClientGet` にも
+  `is_v2`、`expects_100`, `keep_alive`, `auth_header` を追加。
+- `sourcetable.zig`: V2 用に `buildResponseV2()` を新設。`buildResponse()`
+  (V1) のシグネチャは不変。
+- V1 経路 (`ICY 200 OK`, `SOURCETABLE 200 OK`, `SOURCE`, source `OK\r\n`)
+  は完全に従来通り動作。
+
+### スコープ外 (明示)
+
+- **HTTPS / TLS** — 将来検討、今回は対応しない
+- **Digest authentication** — Basic のみ
+- **RTSP/RTP モード** — 主要ベンダーは HTTP モードのみ実装、追従しない
+- **ユーザ管理システム** — flat-file Basic auth のまま (個人運用前提)
+- **厳密 chunked decode** — V2 source POST の body は chunked headers を
+  「未知バイト列」として読み流す。RTCM3 フレーム検出が先頭から同期するので
+  実用上問題なし。str2str など主要 V2 pusher も raw stream で送る実装が多い。
+
+### バージョン整合性
+
+- `build.zig.zon` の version: `0.2.1` (停滞) → `0.5.0` に更新
+- `sourcetable.zig` の `CASTER_VERSION`: `0.2.0` (停滞) → `0.5.0` に更新
+
+---
+
 ## [0.4.0] — 2026-05-18 — VRS + Network RTK foundation (Phase 4 → 7-3)
 
 Phase 3 (FKP runtime wire-up, v0.3.0) 以降の作業をまとめてリリース。

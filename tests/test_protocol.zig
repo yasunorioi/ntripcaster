@@ -1,9 +1,10 @@
 //! tests/test_protocol.zig — ntrip/protocol.zig のユニットテスト
 //!
 //! テスト対象:
-//!   - parseRequest: SOURCE / GET / GET / / 不正コマンド
-//!   - SourceLogin フィールド（password, mount, agent）
-//!   - ClientGet フィールド（mount, auth_header, user_agent, is_v2）
+//!   - parseRequest: SOURCE (v1) / POST (v2) / GET / GET / / 不正コマンド
+//!   - SourceLogin フィールド（password, mount, agent, is_v2, expects_100, auth_header）
+//!   - ClientGet フィールド（mount, auth_header, user_agent, is_v2, keep_alive）
+//!   - SourcetableGet フィールド（is_v2, keep_alive）
 //!   - isNtripAgent: 先頭5文字 "ntrip" 判定
 
 const std = @import("std");
@@ -19,6 +20,9 @@ test "parseRequest: SOURCE login basic" {
     try std.testing.expectEqualStrings("test_pass", req.source_login.password);
     try std.testing.expectEqualStrings("/BUCU0", req.source_login.mount);
     try std.testing.expect(req.source_login.agent == null);
+    try std.testing.expect(!req.source_login.is_v2);
+    try std.testing.expect(!req.source_login.expects_100);
+    try std.testing.expect(req.source_login.auth_header == null);
 }
 
 test "parseRequest: SOURCE with Source-Agent header" {
@@ -52,6 +56,7 @@ test "parseRequest: GET /MOUNT client request" {
     try std.testing.expect(req.client_get.auth_header != null);
     try std.testing.expectEqualStrings("Basic dXNlcjE6cGFzc3dvcmQx", req.client_get.auth_header.?);
     try std.testing.expect(!req.client_get.is_v2);
+    try std.testing.expect(!req.client_get.keep_alive);
 }
 
 test "parseRequest: GET /MOUNT without auth" {
@@ -83,25 +88,89 @@ test "parseRequest: GET with Ntrip-Version header (v2 detection)" {
 
 // ── GET / (sourcetable) ───────────────────────────────────────────────────────
 
-test "parseRequest: GET / sourcetable request" {
+test "parseRequest: GET / sourcetable request (v1)" {
     const header = "GET / HTTP/1.0\r\nUser-Agent: NTRIP rtkrcv/2.4.3\r\n\r\n";
     const req = protocol.parseRequest(header);
     try std.testing.expect(req == .sourcetable_get);
+    try std.testing.expect(!req.sourcetable_get.is_v2);
+    try std.testing.expect(!req.sourcetable_get.keep_alive);
 }
 
 test "parseRequest: GET / HTTP/1.1 also sourcetable" {
     const header = "GET / HTTP/1.1\r\nUser-Agent: NTRIP test\r\n\r\n";
     const req = protocol.parseRequest(header);
     try std.testing.expect(req == .sourcetable_get);
+    try std.testing.expect(!req.sourcetable_get.is_v2);
 }
 
-// ── invalid ───────────────────────────────────────────────────────────────────
+test "parseRequest: GET / sourcetable with v2 + keep-alive" {
+    const header = "GET / HTTP/1.1\r\n" ++
+        "Ntrip-Version: Ntrip/2.0\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "User-Agent: NTRIP test/1.0\r\n" ++
+        "\r\n";
+    const req = protocol.parseRequest(header);
+    try std.testing.expect(req == .sourcetable_get);
+    try std.testing.expect(req.sourcetable_get.is_v2);
+    try std.testing.expect(req.sourcetable_get.keep_alive);
+}
 
-test "parseRequest: unknown command is invalid" {
-    const header = "POST /something HTTP/1.1\r\n\r\n";
+// ── POST (V2 source push) ─────────────────────────────────────────────────────
+
+test "parseRequest: POST source push v2 with Basic auth" {
+    const header = "POST /MYMOUNT HTTP/1.1\r\n" ++
+        "Host: caster.example.com\r\n" ++
+        "Ntrip-Version: Ntrip/2.0\r\n" ++
+        "User-Agent: NTRIP Pusher/1.0\r\n" ++
+        "Authorization: Basic dXNlcjpwYXNz\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "Connection: close\r\n" ++
+        "\r\n";
+    const req = protocol.parseRequest(header);
+    try std.testing.expect(req == .source_login);
+    try std.testing.expectEqualStrings("/MYMOUNT", req.source_login.mount);
+    try std.testing.expect(req.source_login.is_v2);
+    try std.testing.expect(req.source_login.auth_header != null);
+    try std.testing.expectEqualStrings("Basic dXNlcjpwYXNz", req.source_login.auth_header.?);
+    try std.testing.expectEqualStrings("", req.source_login.password);
+    try std.testing.expect(!req.source_login.expects_100);
+    // V2 では Source-Agent 無くても User-Agent にフォールバック
+    try std.testing.expect(req.source_login.agent != null);
+    try std.testing.expectEqualStrings("NTRIP Pusher/1.0", req.source_login.agent.?);
+}
+
+test "parseRequest: POST with Source-Agent overrides User-Agent" {
+    const header = "POST /M HTTP/1.1\r\n" ++
+        "Ntrip-Version: Ntrip/2.0\r\n" ++
+        "Source-Agent: NTRIP str2str/2.4.3\r\n" ++
+        "User-Agent: NTRIP curl/8.0\r\n" ++
+        "Authorization: Basic eDp4\r\n" ++
+        "\r\n";
+    const req = protocol.parseRequest(header);
+    try std.testing.expect(req == .source_login);
+    try std.testing.expectEqualStrings("NTRIP str2str/2.4.3", req.source_login.agent.?);
+}
+
+test "parseRequest: POST with Expect 100-continue" {
+    const header = "POST /M HTTP/1.1\r\n" ++
+        "Ntrip-Version: Ntrip/2.0\r\n" ++
+        "Authorization: Basic eDp4\r\n" ++
+        "Expect: 100-continue\r\n" ++
+        "\r\n";
+    const req = protocol.parseRequest(header);
+    try std.testing.expect(req == .source_login);
+    try std.testing.expect(req.source_login.expects_100);
+}
+
+test "parseRequest: POST without Ntrip-Version is invalid (plain HTTP POST rejected)" {
+    const header = "POST /something HTTP/1.1\r\n" ++
+        "Content-Type: application/octet-stream\r\n" ++
+        "\r\n";
     const req = protocol.parseRequest(header);
     try std.testing.expect(req == .invalid);
 }
+
+// ── invalid ───────────────────────────────────────────────────────────────────
 
 test "parseRequest: empty header is invalid" {
     const req = protocol.parseRequest("");

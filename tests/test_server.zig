@@ -416,3 +416,212 @@ test "source rejected when max_sources exceeded" {
     );
     try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "ERROR - Too Many Sources"));
 }
+
+// ── NTRIP v2 統合テスト ────────────────────────────────────────────────────────
+
+test "v2: GET / sourcetable returns HTTP/1.1 200 + Ntrip-Version" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    var buf: [4096]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "GET / HTTP/1.1\r\nNtrip-Version: Ntrip/2.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    const resp = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Ntrip-Version: Ntrip/2.0\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Type: gnss/sourcetable; charset=UTF-8\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "ENDSOURCETABLE") != null);
+}
+
+test "v2: GET stream returns HTTP/1.1 200 + chunked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    // 先にソースを接続
+    var src = try std.net.tcpConnectToAddress(addr);
+    defer src.close();
+    try src.writeAll("SOURCE testpass /OPEN\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok: [8]u8 = undefined;
+    _ = try src.read(&ok);
+    std.Thread.sleep(30 * std.time.ns_per_ms);
+
+    // V2 クライアント接続
+    var buf: [512]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "GET /OPEN HTTP/1.1\r\nNtrip-Version: Ntrip/2.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    const resp = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Transfer-Encoding: chunked\r\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Content-Type: gnss/data\r\n") != null);
+}
+
+test "v2: POST source with Basic auth succeeds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    // base64("x:testpass") = "eDp0ZXN0cGFzcw=="
+    var buf: [256]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "POST /V2MOUNT HTTP/1.1\r\n" ++
+            "Host: localhost\r\n" ++
+            "Ntrip-Version: Ntrip/2.0\r\n" ++
+            "Source-Agent: NTRIP test/1.0\r\n" ++
+            "Authorization: Basic eDp0ZXN0cGFzcw==\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "\r\n",
+        &buf,
+    );
+    const resp = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, resp, "Ntrip-Version: Ntrip/2.0\r\n") != null);
+}
+
+test "v2: POST source with bad password returns 401" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    // base64("x:wrong") = "eDp3cm9uZw=="
+    var buf: [256]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "POST /M HTTP/1.1\r\n" ++
+            "Ntrip-Version: Ntrip/2.0\r\n" ++
+            "Source-Agent: NTRIP test/1.0\r\n" ++
+            "Authorization: Basic eDp3cm9uZw==\r\n" ++
+            "\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "HTTP/1.1 401"));
+}
+
+test "v2: POST with Expect 100-continue emits 100 then 200" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    var buf: [512]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "POST /CONT HTTP/1.1\r\n" ++
+            "Ntrip-Version: Ntrip/2.0\r\n" ++
+            "Source-Agent: NTRIP test/1.0\r\n" ++
+            "Authorization: Basic eDp0ZXN0cGFzcw==\r\n" ++
+            "Expect: 100-continue\r\n" ++
+            "\r\n",
+        &buf,
+    );
+    const resp = buf[0..n];
+    try std.testing.expect(std.mem.startsWith(u8, resp, "HTTP/1.1 100 Continue\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, resp, "HTTP/1.1 200 OK\r\n") != null);
+}
+
+test "v1 regression: SOURCE still returns OK after v2 changes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    var buf: [64]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "SOURCE testpass /V1MOUNT\r\nSource-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "OK\r\n"));
+}
+
+test "v1 regression: GET / sourcetable still returns SOURCETABLE 200 OK" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    var buf: [4096]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "GET / HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "SOURCETABLE 200 OK\r\n"));
+}

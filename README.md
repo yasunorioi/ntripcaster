@@ -1,6 +1,7 @@
 # ntripcaster
 
-NTRIP v1 caster — Zig rewrite of the BKG reference implementation.
+NTRIP v1 / v2 caster — Zig rewrite of the BKG reference implementation, with
+an original FKP / VRS Network RTK engine layered on top (not in BKG 0.1.5).
 
 > **Originally developed by BKG (Bundesamt für Geodäsie und Kartographie)**
 > as part of the NTRIP protocol reference implementation (NtripCaster 0.1.5).
