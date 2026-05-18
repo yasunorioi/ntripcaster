@@ -155,12 +155,66 @@ LAMBDA / MLAMBDA は ~600 行 + 数値安定性チューニングが要るので
 
 ---
 
-## [unreleased] — Phase 7-4 research phase (no code changes yet)
+## [unreleased] — Phase 7-3.5 / 7-4 / 7-5 計画確定 (調査完了、実装まだ)
 
-Phase 7-4 (DD-N·λ ambiguity fix) 実装前の先行調査フェーズ。詳細は
-`docs/phase7-4-research.md`。4 領域 (LAMBDA/MLAMBDA 参考実装、MSM7
-fine_phase scale 検証、FKP rover 適用例、RTCM SSR 4072 シリーズ) を
-調査してから、新ブランチで実装着手する。
+Phase 7-4 (DD-N·λ ambiguity fix) 実装前の先行調査が完了し、当初想定と
+**大きく異なる発見**が出た。詳細: `docs/{lambda-research,msm7-scale-validation,type59-rover-side,ssr-feasibility}.md`
++ `docs/phase7-4-research.md` の「統合判断 (2026-05-18 確定)」セクション。
+
+### 主要発見
+
+- **領域 2 (MSM7 parser)**: 既存 `src/fkp/msm7.zig::extractPhase` に **2 つの
+  構造的バグ**:
+  - fine_phase scale が `2^-29 ms` (誤、MSM4/5 用) で実装、MSM7 (24-bit)
+    の正しいスケールは `2^-31 ms`。**factor 4 誤り**。
+  - signal / satellite data block の bit layout が **cell-major** で実装
+    されているが、RTCM 10403.3 / RTKLIB は **field-major**
+    (`[pseudo×ncell][phase×ncell][lock×ncell][half×ncell][cnr×ncell][rate×ncell]`)。
+    ncell=1 or nsat=1 のときだけ偶然一致するので一部テストでは見えなかった。
+  - 既存テスト (`expectedPhaseM` + frame builder) も同じ誤りで self-consistent
+    化していた。
+  - = Phase 5b-3 で rover 補正値が ±1171 m clamp ヒットしていた**真因**。
+    LAMBDA 以前の問題。
+- **領域 3 (Type 59 rover side)**: RTKLIB は Type 59 を **silent ignore**
+  (switch 文に case なし)、標準 FKP (Type 1034/1035) も RTKLIB は空スタブ。
+  業界全体で FKP は事実上廃止 (Geo++ GNSMART のみ生きた採用)。
+  → Type 59 を **caster 内部 IPC** と再定義、rover には MSM7 補正済みのみ
+    届ける (Phase 5b の applyPhaseCorrection 路線で既に実現済み)。
+- **領域 4 (RTCM SSR 検討)**: RTKLIB SSR support は orbit/clock/code-bias/URA/
+  phase-bias の SSR 1-7 のみ。**atmospheric SSR (STEC / tropo) は decoder
+  すら未実装で spec も非公開**。NRTK 業界の主流は VRS+FKP。
+  → **FKP 継続が最適**、SSR 移行は不要。Phase 8 で補助 SSR は検討余地。
+- **領域 1 (LAMBDA)**: RTKLIB `lambda.c` は実は **188 行** (見積もり 600 行
+  は過大)、Rust 実装は GitHub/crates.io ともに 0 件 (FFI 案は破棄)。
+  Zig フル port は 250-350 LoC、3-4 日工数。
+  → **Bootstrapping (~50 LoC) を Day 1 先行 → 実機 success rate 測定 →
+    必要なら MLAMBDA** の二段階リリース推奨。
+
+### 確定したフェーズ計画
+
+| Phase | 内容 | 工数 | 必要性 |
+|-------|------|------|--------|
+| **7-3.5** | MSM7 parser バグ修正 (scale 2 行 + layout 中規模書き直し + test 同期 + 実機検証) | 半日-1 日 | **必須、最優先** |
+| **7-4a** | Bootstrapping ambiguity + cycle slip 検出 (lock_time monitoring) | 1 日 | 7-3.5 後の magnitude が > 10 m/rad なら必要 |
+| **7-4b** | MLAMBDA フル実装 (rtklib-py/mlambda.py からポート) | 3-4 日 | 7-4a の fix 率 < 80% なら必要 |
+| **7-5** | runtime 配線切替 (computeFkp → computeFkpDd) + L2 周波数スケール η^i 追加 + 実機検証 | 半日-1 日 | 必須 |
+| **8** | SSR 1/2/4 (orbit + clock) 補助配信 | 1-2 日 | オプション |
+
+### 次セッション最初の作業
+
+`phase7-3.5-msm7-fix` ブランチを master から派生し、MSM7 parser バグ修正
++ test 同期 + 実機 RTKLIB との binary cross-decode + Phase 5b-3 再実行で
+magnitude 再計測。詳細は `docs/phase7-4-research.md` § 「次セッション最初
+の作業」。
+
+### 副次決定 (記録のみ)
+
+- Type 59 は caster **内部 IPC** であり、rover には届けない (RTKLIB が
+  silent ignore するため)。Phase 5b の `forwardFiltered` が既に Type 59
+  を drop しているので機能変更なし。コメントレベル更新のみ予定。
+- 領域 3 の指摘で **L2 周波数スケール η^i (= (F_L1/F_L2)^2 ≈ 1.6469)** が
+  `computePhaseDelta` に未実装と判明。Phase 7-5 で追加。Phase 7-3 までの
+  L1 のみ補正では無害。
 
 ---
 
