@@ -187,69 +187,100 @@ pub fn extractPhase(
     }
 
     // ── セルマスク ────────────────────────────────────────────────────
+    // RTCM 10403.3 § 3.5.16: cell_mask は nsat*nsig bit、各 (sat,sig) ペアが valid か示す。
+    // valid cell の index 順リスト (valid_cells) を構築して signal data ループで使う。
     var cell_valid: [128]bool = [1]bool{false} ** 128;
+    var valid_cells: [128]u8 = undefined;
     var ncell_valid: usize = 0;
     for (0..ncell) |i| {
         cell_valid[i] = br.readU(1) == 1;
-        if (cell_valid[i]) ncell_valid += 1;
+        if (cell_valid[i]) {
+            valid_cells[ncell_valid] = @truncate(i);
+            ncell_valid += 1;
+        }
     }
 
-    // ── サテライトデータ (MSM7: 8+4+10+14 = 36 bits per sat) ────────
+    // ── サテライトデータ (field-major: 各 field を nsat 回ループで読む) ──
+    // RTCM 10403.3 § 3.5.16 / RTKLIB rtcm3.c::decode_msm7 (L2403-2418) 準拠。
+    // 旧実装は per-sat に 36-bit ブロックを書いていたが、nsat≥2 で実 RTCM3
+    // ストリームと bit offset がズレる構造的バグ (Phase 7-3.5 修正)。
     var rough_int: [64]u8 = undefined;
     var rough_mod: [64]u32 = undefined;
     for (0..nsat) |i| {
         rough_int[i] = @truncate(br.readU(8));
+    }
+    for (0..nsat) |_| {
         br.skip(4); // extended satellite info
+    }
+    for (0..nsat) |i| {
         rough_mod[i] = @truncate(br.readU(10));
+    }
+    for (0..nsat) |_| {
         br.skip(14); // rough phase range rate
     }
 
-    // ── シグナルデータ (MSM7: 20+24+10+1+10+15 = 80 bits per cell) ──
-    // RTCM 10403.3 § 3.5.16 準拠: signal data block は cell_mask=1 の cell 分のみ存在
-    // (= ncell_valid 個)。invalid cell の 80 bit を読み飛ばすと bit offset がズレるので、
-    // valid 判定は readS の前に行う。
+    // ── シグナルデータ (field-major: 各 field を ncell_valid 回ループ) ──
+    // RTCM 10403.3 / RTKLIB rtcm3.c::decode_msm7 (L2420-2440) 準拠。
+    // signal data は valid cell の数だけ存在 (cell_mask=false の cell は skip)。
+    // 6 つの field を順に: pseudo, phase, lock, half, cnr, rate。各 ncell_valid 個。
+    // MSM7 fine_phase scale: 2^-31 ms (RTKLIB P2_31 × RANGE_MS)。
+    // 旧実装は 2^-29 ms (MSM4/5 用) でデコードしていた factor 4 バグ。
+    var fine_phase: [128]i32 = undefined;
+    var lock_time_raw: [128]u16 = undefined;
+    var cnr_raw: [128]u16 = undefined;
+    for (0..ncell_valid) |_| {
+        br.skip(20); // fine pseudorange (skip、本実装は phase のみ使用)
+    }
+    for (0..ncell_valid) |j| {
+        fine_phase[j] = @intCast(br.readS(24));
+    }
+    for (0..ncell_valid) |j| {
+        lock_time_raw[j] = @truncate(br.readU(10));
+    }
+    for (0..ncell_valid) |_| {
+        br.skip(1); // half-cycle ambiguity
+    }
+    for (0..ncell_valid) |j| {
+        cnr_raw[j] = @truncate(br.readU(10));
+    }
+    for (0..ncell_valid) |_| {
+        br.skip(15); // fine phase range rate
+    }
+
+    // ── 出力構築 ──────────────────────────────────────────────────────
     var obs_list = std.ArrayList(PhaseObs){};
     defer obs_list.deinit(allocator);
 
-    for (0..nsat) |si| {
-        for (0..nsig) |gi| {
-            const cell_idx = si * nsig + gi;
-            if (!cell_valid[cell_idx]) continue;
+    for (0..ncell_valid) |j| {
+        const cell_idx = @as(usize, valid_cells[j]);
+        const si = cell_idx / nsig;
+        const gi = cell_idx % nsig;
 
-            const fine_pseudo = br.readS(20);
-            _ = fine_pseudo;
-            const fine_phase = br.readS(24);
-            const lock_time_indicator: u16 = @truncate(br.readU(10));
-            br.skip(1); // half-cycle ambiguity
-            const cnr_raw: u32 = @truncate(br.readU(10));
-            br.skip(15); // fine phase range rate
+        if (rough_int[si] == 255) continue; // RTCM3 invalid sentinel (sat range)
+        if (fine_phase[j] == -(@as(i32, 1) << 23)) continue; // invalid fine phase sentinel
 
-            if (rough_int[si] == 255) continue; // RTCM3 invalid sentinel
-            if (fine_phase == -(1 << 23)) continue; // invalid fine phase
+        // 搬送波位相 [m]
+        // rough_range [ms] = rough_int + rough_mod * 2^-10
+        const rough_ms: f64 =
+            @as(f64, @floatFromInt(rough_int[si])) +
+            @as(f64, @floatFromInt(rough_mod[si])) * (1.0 / 1024.0);
+        // MSM7 fine_phase 解像度: 2^-31 ms (24 bit signed)。MSM4/5 は 2^-29 ms (22 bit)。
+        const fine_ms: f64 = @as(f64, @floatFromInt(fine_phase[j])) * (1.0 / @as(f64, 1 << 31));
+        const phase_ms: f64 = rough_ms + fine_ms;
+        const phase_m: f64 = phase_ms * 1e-3 * LIGHT_SPEED;
 
-            // 搬送波位相 [m]
-            // rough_range [ms] = rough_int + rough_mod * 2^-10
-            const rough_ms: f64 =
-                @as(f64, @floatFromInt(rough_int[si])) +
-                @as(f64, @floatFromInt(rough_mod[si])) * (1.0 / 1024.0);
-            // fine_phase 解像度: 2^-29 ms
-            const fine_ms: f64 = @as(f64, @floatFromInt(fine_phase)) * (1.0 / @as(f64, 1 << 29));
-            const phase_ms: f64 = rough_ms + fine_ms;
-            const phase_m: f64 = phase_ms * 1e-3 * LIGHT_SPEED;
+        const sig_id = if (gi < sig_count) sig_ids[gi] else 2;
+        const freq = gpsFreqFromSigId(sig_id);
+        const band = gpsBandFromSigId(sig_id);
 
-            const sig_id = if (gi < sig_count) sig_ids[gi] else 2;
-            const freq = gpsFreqFromSigId(sig_id);
-            const band = gpsBandFromSigId(sig_id);
-
-            try obs_list.append(allocator, .{
-                .prn = prns[si],
-                .phase_m = phase_m,
-                .freq_hz = freq,
-                .band = band,
-                .lock_time_indicator = lock_time_indicator,
-                .cnr_db_hz = @as(f64, @floatFromInt(cnr_raw)) * 0.0625,
-            });
-        }
+        try obs_list.append(allocator, .{
+            .prn = prns[si],
+            .phase_m = phase_m,
+            .freq_hz = freq,
+            .band = band,
+            .lock_time_indicator = lock_time_raw[j],
+            .cnr_db_hz = @as(f64, @floatFromInt(cnr_raw[j])) * 0.0625,
+        });
     }
 
     return try obs_list.toOwnedSlice(allocator);
@@ -337,67 +368,87 @@ pub fn applyPhaseCorrection(
     }
 
     // ── cell_mask ──────────────────────────────────────────────────
+    // valid cell の cell_idx 昇順リストを構築 (signal data 内 j 番目 → cell_idx の逆引きに使う)。
     var cell_valid: [128]bool = [1]bool{false} ** 128;
+    var valid_cells: [128]u8 = undefined;
+    var ncell_valid: usize = 0;
     for (0..ncell) |i| {
         cell_valid[i] = br.readU(1) == 1;
+        if (cell_valid[i]) {
+            valid_cells[ncell_valid] = @truncate(i);
+            ncell_valid += 1;
+        }
     }
 
-    // ── サテライトデータ (rough_int, rough_mod を保存) ──────────────
+    // ── サテライトデータ (field-major: 各 field を nsat 回ループ) ──
+    // RTKLIB rtcm3.c::decode_msm7 (L2403-2418) と同じ順序。
     var rough_int: [64]u32 = undefined;
     var rough_mod: [64]u32 = undefined;
     for (0..nsat) |i| {
         rough_int[i] = @truncate(br.readU(8));
+    }
+    for (0..nsat) |_| {
         br.skip(4); // extended satellite info
+    }
+    for (0..nsat) |i| {
         rough_mod[i] = @truncate(br.readU(10));
+    }
+    for (0..nsat) |_| {
         br.skip(14); // rough phase range rate
     }
 
-    // ── シグナルデータ (cell_valid のみ 80 bit ずつ進める) ─────────
-    // 1 cell の signal data 開始 bit offset を記録 → fine_phase は +20 bit 位置
-    for (0..nsat) |si| {
-        for (0..nsig) |gi| {
-            const cell_idx = si * nsig + gi;
-            if (!cell_valid[cell_idx]) continue;
+    // ── シグナルデータ (field-major) ────────────────────────────────
+    // 6 field がそれぞれ ncell_valid 個ずつ連続: pseudo(20) → phase(24) →
+    // lock(10) → half(1) → cnr(10) → rate(15)。
+    // fine_phase の書き換えは「phase field の base bit offset + j × 24 bit」で行う。
+    const sig_data_base = br.bitPos();
+    const phase_field_base = sig_data_base + 20 * ncell_valid;
 
-            const block_start = br.bitPos();
-            br.skip(20); // fine_pseudo
-            const fine_phase = br.readS(24);
-            br.skip(10 + 1 + 10 + 15);
+    for (0..ncell_valid) |j| {
+        const cell_idx = @as(usize, valid_cells[j]);
+        const si = cell_idx / nsig;
+        const gi = cell_idx % nsig;
 
-            // 補正対象として無効な cell をスキップ
-            if (rough_int[si] == 255) continue;
-            if (fine_phase == -(@as(i64, 1) << 23)) continue;
+        // fine_phase を field 内オフセットから直読
+        const fine_phase_offset = phase_field_base + j * 24;
+        var pbr = BitReader.init(payload);
+        pbr.skip(fine_phase_offset);
+        const fine_phase = pbr.readS(24);
 
-            if (gi >= sig_count) continue;
-            const prn = prns[si];
-            const sig_id = sig_ids[gi];
-            const band = gpsBandFromSigId(sig_id);
-            if (band == .unknown) continue;
-            const delta_m = findDelta(deltas, prn, band) orelse continue;
+        // 補正対象として無効な cell をスキップ
+        if (rough_int[si] == 255) continue;
+        if (fine_phase == -(@as(i64, 1) << 23)) continue;
 
-            // 現 phase_ms から新 fine_phase bits を計算
-            const rough_ms: f64 =
-                @as(f64, @floatFromInt(rough_int[si])) +
-                @as(f64, @floatFromInt(rough_mod[si])) * (1.0 / 1024.0);
-            const fine_ms_cur: f64 = @as(f64, @floatFromInt(fine_phase)) *
-                (1.0 / @as(f64, 1 << 29));
-            const phase_ms_new: f64 = rough_ms + fine_ms_cur +
-                delta_m / (LIGHT_SPEED * 1e-3);
+        if (gi >= sig_count) continue;
+        const prn = prns[si];
+        const sig_id = sig_ids[gi];
+        const band = gpsBandFromSigId(sig_id);
+        if (band == .unknown) continue;
+        const delta_m = findDelta(deltas, prn, band) orelse continue;
 
-            const fine_ms_new: f64 = phase_ms_new - rough_ms;
-            var new_fine_bits: i64 = @intFromFloat(@round(fine_ms_new * @as(f64, 1 << 29)));
+        // 現 phase_ms から新 fine_phase bits を計算
+        // MSM7 fine_phase 解像度: 2^-31 ms (RTKLIB rtcm3.c::decode_msm7 P2_31)。
+        const rough_ms: f64 =
+            @as(f64, @floatFromInt(rough_int[si])) +
+            @as(f64, @floatFromInt(rough_mod[si])) * (1.0 / 1024.0);
+        const fine_ms_cur: f64 = @as(f64, @floatFromInt(fine_phase)) *
+            (1.0 / @as(f64, 1 << 31));
+        const phase_ms_new: f64 = rough_ms + fine_ms_cur +
+            delta_m / (LIGHT_SPEED * 1e-3);
 
-            // [-2^23+1, 2^23-1] にクランプ (-2^23 = invalid sentinel を避ける)
-            const MAX_FINE: i64 = (@as(i64, 1) << 23) - 1;
-            const MIN_FINE: i64 = -MAX_FINE;
-            if (new_fine_bits > MAX_FINE) new_fine_bits = MAX_FINE;
-            if (new_fine_bits < MIN_FINE) new_fine_bits = MIN_FINE;
+        const fine_ms_new: f64 = phase_ms_new - rough_ms;
+        var new_fine_bits: i64 = @intFromFloat(@round(fine_ms_new * @as(f64, 1 << 31)));
 
-            // signed 24-bit を 2's complement パターンへ
-            const new_fine_u: u64 = @as(u64, @bitCast(new_fine_bits)) &
-                ((@as(u64, 1) << 24) - 1);
-            bits.writeBitsAt(payload, block_start + 20, 24, new_fine_u);
-        }
+        // [-2^23+1, 2^23-1] にクランプ (-2^23 = invalid sentinel を避ける)
+        const MAX_FINE: i64 = (@as(i64, 1) << 23) - 1;
+        const MIN_FINE: i64 = -MAX_FINE;
+        if (new_fine_bits > MAX_FINE) new_fine_bits = MAX_FINE;
+        if (new_fine_bits < MIN_FINE) new_fine_bits = MIN_FINE;
+
+        // signed 24-bit を 2's complement パターンへ
+        const new_fine_u: u64 = @as(u64, @bitCast(new_fine_bits)) &
+            ((@as(u64, 1) << 24) - 1);
+        bits.writeBitsAt(payload, fine_phase_offset, 24, new_fine_u);
     }
 
     // ── CRC-24Q 再計算 ─────────────────────────────────────────────

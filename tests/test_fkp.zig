@@ -474,11 +474,12 @@ test "fkp: computeFkp Hokkaido synthetic scale check" {
 // ── Phase 5b-0: extractPhase の cell_mask=false bit offset 修正 ─────────────
 
 /// extractPhase が返すべき phase_m を rough_int / rough_mod / fine_phase から再計算する。
+/// MSM7 fine_phase scale: 2^-31 ms (24 bit signed)。MSM4/5 は 2^-29 ms (22 bit)。
 fn expectedPhaseM(rough_int: u32, rough_mod: u32, fine_phase: i64) f64 {
     const c: f64 = 299792458.0;
     const rough_ms = @as(f64, @floatFromInt(rough_int)) +
         @as(f64, @floatFromInt(rough_mod)) * (1.0 / 1024.0);
-    const fine_ms = @as(f64, @floatFromInt(fine_phase)) * (1.0 / @as(f64, 1 << 29));
+    const fine_ms = @as(f64, @floatFromInt(fine_phase)) * (1.0 / @as(f64, 1 << 31));
     return (rough_ms + fine_ms) * 1e-3 * c;
 }
 
@@ -500,6 +501,44 @@ fn writeMsm7TestHeader(bw: *fkp_bits.BitWriter) void {
     bw.writeU(32, (@as(u32, 1) << 30) | (@as(u32, 1) << 16));
 }
 
+/// MSM7 satellite data block を field-major (RTKLIB / RTCM 10403.3 § 3.5.16 準拠)
+/// で書き込む。3 サテライト固定 (nsat=3)。
+/// 4 field × 3 sat = 8+4+10+14 = 36 bit × 3 sat。
+fn writeMsm7SatDataFieldMajor(
+    bw: *fkp_bits.BitWriter,
+    rng_int: [3]u32,
+    rng_mod: [3]u32,
+) void {
+    // field 1: rng_int × nsat
+    for (rng_int) |v| bw.writeU(8, v);
+    // field 2: extended info × nsat (常に 0)
+    for (0..3) |_| bw.writeU(4, 0);
+    // field 3: rng_mod × nsat
+    for (rng_mod) |v| bw.writeU(10, v);
+    // field 4: rough phase range rate × nsat (常に 0)
+    for (0..3) |_| bw.writeS(14, 0);
+}
+
+/// MSM7 signal data block を field-major で書き込む。ncell 個の cell に対して、
+/// 6 つの field を順に: pseudo(20) → phase(24) → lock(10) → half(1) → cnr(10) → rate(15)。
+fn writeMsm7SignalDataFieldMajor(
+    bw: *fkp_bits.BitWriter,
+    fine_phase: []const i64,
+) void {
+    // field 1: pseudo × ncell (常に 0)
+    for (0..fine_phase.len) |_| bw.writeS(20, 0);
+    // field 2: phase × ncell
+    for (fine_phase) |fp| bw.writeS(24, fp);
+    // field 3: lock × ncell (常に 0)
+    for (0..fine_phase.len) |_| bw.writeU(10, 0);
+    // field 4: half-cycle × ncell (常に 0)
+    for (0..fine_phase.len) |_| bw.writeU(1, 0);
+    // field 5: cnr × ncell (常に 0)
+    for (0..fine_phase.len) |_| bw.writeU(10, 0);
+    // field 6: rate × ncell (常に 0)
+    for (0..fine_phase.len) |_| bw.writeS(15, 0);
+}
+
 test "fkp: extractPhase full cell_mask returns all 6 observations" {
     // 全 cell valid (nsat=3, nsig=2 → ncell=6) の既存挙動 regression。
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -513,30 +552,12 @@ test "fkp: extractPhase full cell_mask returns all 6 observations" {
     // cell_mask: 全 valid
     for (0..6) |_| bw.writeU(1, 1);
 
-    // sat data (PRN1 / PRN2 / PRN3 でユニークな rough)
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 512);
-    bw.writeS(14, 0);
-    bw.writeU(8, 71);
-    bw.writeU(4, 0);
-    bw.writeU(10, 256);
-    bw.writeS(14, 0);
-    bw.writeU(8, 72);
-    bw.writeU(4, 0);
-    bw.writeU(10, 128);
-    bw.writeS(14, 0);
+    // sat data (PRN1 / PRN2 / PRN3 でユニークな rough)、field-major
+    writeMsm7SatDataFieldMajor(&bw, .{ 70, 71, 72 }, .{ 512, 256, 128 });
 
-    // signal data: 6 cell × 80 bit、それぞれ distinct な fine_phase
+    // signal data: 6 cell ぶん、field-major
     const fps = [_]i64{ 100000, 110000, 200000, 210000, 300000, 310000 };
-    for (fps) |fp| {
-        bw.writeS(20, 0);
-        bw.writeS(24, fp);
-        bw.writeU(10, 0);
-        bw.writeU(1, 0);
-        bw.writeU(10, 0);
-        bw.writeS(15, 0);
-    }
+    writeMsm7SignalDataFieldMajor(&bw, &fps);
 
     const obs = try fkp_msm7.extractPhase(alloc, &payload);
     try std.testing.expectEqual(@as(usize, 6), obs.len);
@@ -580,26 +601,8 @@ fn buildMsm7TestFrame(buf: *[102]u8, fps: [6]i64) usize {
     var bw = fkp_bits.BitWriter.init(buf[3 .. 3 + payload_bytes]);
     writeMsm7TestHeader(&bw);
     for (0..6) |_| bw.writeU(1, 1);
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 512);
-    bw.writeS(14, 0);
-    bw.writeU(8, 71);
-    bw.writeU(4, 0);
-    bw.writeU(10, 256);
-    bw.writeS(14, 0);
-    bw.writeU(8, 72);
-    bw.writeU(4, 0);
-    bw.writeU(10, 128);
-    bw.writeS(14, 0);
-    for (fps) |fp| {
-        bw.writeS(20, 0);
-        bw.writeS(24, fp);
-        bw.writeU(10, 0);
-        bw.writeU(1, 0);
-        bw.writeU(10, 0);
-        bw.writeS(15, 0);
-    }
+    writeMsm7SatDataFieldMajor(&bw, .{ 70, 71, 72 }, .{ 512, 256, 128 });
+    writeMsm7SignalDataFieldMajor(&bw, &fps);
 
     const crc = test_rtcm3.crc24q(buf[0 .. 3 + payload_bytes]);
     buf[3 + payload_bytes + 0] = @truncate(crc >> 16);
@@ -943,29 +946,12 @@ test "fkp: extractPhase partial cell_mask preserves bit offset" {
     bw.writeU(1, 0);
     bw.writeU(1, 1);
 
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 512);
-    bw.writeS(14, 0);
-    bw.writeU(8, 71);
-    bw.writeU(4, 0);
-    bw.writeU(10, 256);
-    bw.writeS(14, 0);
-    bw.writeU(8, 72);
-    bw.writeU(4, 0);
-    bw.writeU(10, 128);
-    bw.writeS(14, 0);
+    // sat data field-major (nsat=3)
+    writeMsm7SatDataFieldMajor(&bw, .{ 70, 71, 72 }, .{ 512, 256, 128 });
 
-    // signal data: valid cell 4 個分のみ (仕様準拠)
+    // signal data: valid cell 4 個分のみ、field-major (仕様準拠)
     const fps = [_]i64{ 100000, 200000, 300000, 400000 };
-    for (fps) |fp| {
-        bw.writeS(20, 0);
-        bw.writeS(24, fp);
-        bw.writeU(10, 0);
-        bw.writeU(1, 0);
-        bw.writeU(10, 0);
-        bw.writeS(15, 0);
-    }
+    writeMsm7SignalDataFieldMajor(&bw, &fps);
 
     const obs = try fkp_msm7.extractPhase(alloc, &payload);
     try std.testing.expectEqual(@as(usize, 4), obs.len);
@@ -1447,39 +1433,26 @@ test "fkp: extractPhase exposes lock_time_indicator and cnr_db_hz" {
     writeMsm7TestHeader(&bw);
     for (0..6) |_| bw.writeU(1, 1); // cell_mask all valid
 
-    // sat data: PRN1/2/3 で同じ rough_int + 異なる rough_mod
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 512);
-    bw.writeS(14, 0);
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 256);
-    bw.writeS(14, 0);
-    bw.writeU(8, 70);
-    bw.writeU(4, 0);
-    bw.writeU(10, 128);
-    bw.writeS(14, 0);
+    // sat data: PRN1/2/3 で同じ rough_int + 異なる rough_mod、field-major
+    writeMsm7SatDataFieldMajor(&bw, .{ 70, 70, 70 }, .{ 512, 256, 128 });
 
-    // signal data: 6 cell × 80 bit。lock_time / CNR は cell ごとに変える。
+    // signal data field-major: lock_time / CNR は cell ごとに変える。
     // raw lock_time = 10, 20, 30, 40, 50, 60
     // raw CNR     = 640, 720, 560, 800, 480, 880  (× 0.0625 dB-Hz = 40, 45, 35, 50, 30, 55)
-    const cells = [_]struct { lt: u32, cnr: u32 }{
-        .{ .lt = 10, .cnr = 640 },
-        .{ .lt = 20, .cnr = 720 },
-        .{ .lt = 30, .cnr = 560 },
-        .{ .lt = 40, .cnr = 800 },
-        .{ .lt = 50, .cnr = 480 },
-        .{ .lt = 60, .cnr = 880 },
-    };
-    for (cells) |c| {
-        bw.writeS(20, 0); // fine_pseudo
-        bw.writeS(24, 1000); // fine_phase
-        bw.writeU(10, c.lt); // lock_time
-        bw.writeU(1, 0); // half-cycle
-        bw.writeU(10, c.cnr); // CNR
-        bw.writeS(15, 0); // fine phase rate
-    }
+    const lts = [_]u32{ 10, 20, 30, 40, 50, 60 };
+    const cnrs = [_]u32{ 640, 720, 560, 800, 480, 880 };
+    // field 1: pseudo × 6 (= 0)
+    for (0..6) |_| bw.writeS(20, 0);
+    // field 2: phase × 6 (= 1000)
+    for (0..6) |_| bw.writeS(24, 1000);
+    // field 3: lock × 6
+    for (lts) |lt| bw.writeU(10, lt);
+    // field 4: half × 6 (= 0)
+    for (0..6) |_| bw.writeU(1, 0);
+    // field 5: cnr × 6
+    for (cnrs) |cnr| bw.writeU(10, cnr);
+    // field 6: rate × 6 (= 0)
+    for (0..6) |_| bw.writeS(15, 0);
 
     const obs = try fkp_msm7.extractPhase(alloc, &payload);
     try std.testing.expectEqual(@as(usize, 6), obs.len);
