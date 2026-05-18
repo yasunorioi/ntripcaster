@@ -78,30 +78,59 @@ LAMBDA は数値的にデリケート、cycle slip 検出も必要。
 
 ### 2.2 案 B: rough_range を使った近似 geometric range subtraction
 
-MSM7 の各観測値には `rough_range_ms = rough_int + rough_mod/1024` という
-**衛星-局の見かけ距離 [ms]** が同梱されている。これを `ρ_approx` として
-使い、`L̃ = L − ρ_approx ≈ I + T + N·λ` (ms 級スケール) を作る。
+> ⚠️ **2026-05-18 棄却**: 案 B は **物理的に成立しない** ことが Phase 6b-3
+> の実機検証と再計算で判明した。Phase 6b 全体を撤去し、Phase 7
+> (ephemeris) に直行する判断を下した (詳細は § 9)。
+>
+> **誤認の元**: 当初本節は「MSM7 の rough_range_ms は衛星-局の
+> 見かけ距離 (geometric range の近似)」と書いていたが、これは MSM7 spec
+> (RTCM 10403.3 § 3.5.16) の誤読。
+>
+> 正しい仕様: `rough_int + rough_mod/1024` は受信機の **carrier phase
+> 観測値そのもの** を 1/1024 ms 精度に量子化した値であり、fine_phase は
+> 同じ観測値の更なる細かい桁 (2^-29 ms) を表す "encoding remainder"。
+> つまり `phase_m = rough_range_m + fine_correction` という **同一観測値の
+> coarse + fine 2 段表現** に過ぎず、引いても geometric range の分離には
+> ならない。
+>
+> 引き算で残るのは fine_phase × c × 2^-29 × 1e-3 = **rounding noise (±4.7m)**
+> だけで、ここには ρ / iono / clock / N·λ などの物理情報は **含まれない**
+> (これらは rough_range の coarse 部分にまとめて畳み込まれている)。
+>
+> 実機確認結果: Phase 6b-3 で residual ベースに置換しても、Paris 三角測量
+> の `excess=13` カウンタは Phase 6a と同じ (= FKP 値が依然として閾値 100
+> m/rad を超える)。
+>
+> **DD + ambiguity baseline での救済も不可**:
+> § 5.1.4-5 の "DD + 時間差 baseline" は本来 raw `phase_m` + 真の geometric
+> range removal を前提とした構成。residual (= rounding noise) に対して同じ
+> 構造を組んでも、入力が物理情報を持たないので出力も noise のまま。
+> 真の geometric range removal は ephemeris ベースの ρ 計算が必須で、これは
+> Phase 7 のスコープ。
+>
+> 結論として案 B は撤去、Phase 7 へ直行する。
 
 ```zig
-L_residual_a = phase_obs_a - rough_range_m_a   // ~m scale (with N·λ ambiguity)
+L_residual_a = phase_obs_a - rough_range_m_a   // ±4.7m (rounding noise only)
 ```
 
-このまま SD/DD すれば clock と T は消える。N·λ は cycle slip がない限り
-**1 epoch 内で stable**。連続 epoch の **差分** (= epoch-to-epoch DD)
-を取れば N も消えて純粋な iono 変化 (cm/sec) になる。
+SD/DD で station/sat clock を消し、初回 epoch の DD を ambiguity baseline
+として記録、以降の epoch では `DD(t) − DD(t_0)` を residual として平面 fit。
+これで cycle slip がない限り cm-scale 残差で FKP 計算可能。
 
 | 工程 | 内容 | 規模 |
 | --- | --- | --- |
 | extractPhase 拡張 | rough_range_m も返すよう改修 | ~30 行 |
-| Eph parse 不要 | rough_range で代用 | 0 行 |
 | Residual 計算 | L - rough を SatObs に保存 | ~50 行 |
 | Single-epoch DD | reference PRN 選定 + SD/DD | ~200 行 |
+| Ambiguity baseline | 初回 epoch DD を保存 + 以降は差分 | ~150 行 |
+| cycle slip 検出 | lock_time_indicator 監視 + baseline reset | ~100 行 |
 | computeFkp 改修 | DD residual ベースに置換 | ~100 行 |
-| **合計** | | **~400 行** |
+| **合計** | | **~630 行** |
 
 位置精度は本格版より落ちる (rough_range の量子化は 1/1024 ms ≈ 293 m、
-fine_phase で詰めても N·λ が DD で残る) が、補正値の magnitude は **physical
-plausible range (cm scale)** に収まることを期待できる。
+fine_phase で詰めても N·λ DD の baseline 推定誤差が残る) が、補正値の
+magnitude は **physical plausible range (cm-dm scale)** に収まる見込み。
 
 ### 2.3 案 C: 数 epoch を見て補正値を統計的に間引く (heuristic)
 
@@ -245,7 +274,12 @@ limited (毎 N 秒 / 局ごと最初の 3 回など) にする。
 
 ---
 
-## 5. Phase 6b (案 B) 実装計画
+## 5. Phase 6b (案 B) 実装計画 — ❌ 撤去 (2026-05-18)
+
+> **本節以下は撤去された設計**。Phase 6b-1/2/3 で実装したが、§ 2.2 で
+> 述べた通り案 B の前提が物理的に成立しないため全コード/テストを revert
+> した。歴史的経緯として残しておくが、参照用途のみ。Phase 7 の設計は
+> 別途 `docs/phase7-design.md` で扱う予定。
 
 ### 5.1 必要な拡張
 
@@ -413,12 +447,42 @@ cycle slip が起きると ambiguity がジャンプして補正値が暴れる�
 
 ## 9. 作業見積もり総括
 
-| Phase | 内容 | 工数 | 効果 |
-| --- | --- | --- | --- |
-| **6a** | computeFkp 閾値判定 + 棄却 | 2-3h | 補正値暴走防止 |
-| **6b** | rough_range residual + DD + 簡易 ambiguity | 13h ≈ 2-3 セッション | 10cm 級精度 |
-| **7** | フル ephemeris + LAMBDA | ~3 週間 | cm 級精度 |
+| Phase | 内容 | 工数 | 効果 | 状況 |
+| --- | --- | --- | --- | --- |
+| **6a** | computeFkp 閾値判定 + 棄却 | 2-3h | 補正値暴走防止 | ✅ master |
+| **6b** | rough_range residual + DD + 簡易 ambiguity | (撤去) | — | ❌ 案 B 物理不成立 |
+| **7** | フル ephemeris + LAMBDA | ~3 週間 | cm 級精度 | 次セッション |
 
-Phase 6a は即着手して `phase4-vrs` ブランチに足してマージ可能な状態にする。
-Phase 6b は別ブランチ (`phase6-fkp-residual` 等) で着手し、phase4-vrs
-マージ後の master から派生させる。Phase 7 は将来オプション。
+### 9.1 Phase 6b 撤去の経緯 (2026-05-18 追記)
+
+Phase 6b-1/2/3 で rough_range 配管 + residual 化を実装したが、**案 B の
+前提 (rough_range が geometric range 近似) が誤読**だったことが判明。
+詳細は § 2.2 訂正。
+
+実機 (centipede-paris) での 6b-3 動作確認:
+- `excess` カウンタ (FKP magnitude が 100 m/rad 閾値を超えた PRN 数) は
+  Phase 6a と同等 (cycle あたり 13 件)
+- magnitude reduction なし → 6b-3 の追加コードは 6a に対して動作改善なし
+
+理論再分析の結論 (本文 § 2.2 末尾):
+- residual = phase − rough_range は rounding noise (±4.7m wrap)
+- DD + 時間差 baseline を residual 上で組んでも noise の DD/差分しか出ない
+- 真の geometric range removal は ephemeris 必須 → Phase 7 スコープ
+
+判断:
+- **Phase 6b の全コード/テスト/CHANGELOG 記述を revert**
+- master/phase4-vrs/phase6-fkp-residual の各ブランチを Phase 6a 状態
+  (`300bf5a`) に揃える
+- Phase 7 (ephemeris + DD + LAMBDA) に直行
+
+### 9.2 Phase 6a を最終状態とする経過措置
+
+cm 級補正値が出せない以上、当面の caster は:
+- 主上流の生 RTCM3 を passthrough (Phase 4)
+- VRS 機能で rover に対する仮想基準局を立てる (Phase 5a)
+- FKP は computeFkp 閾値で異常値を出さない (Phase 6a) — つまりほぼ常に
+  empty params で配信される (Paris では excess=13/cycle で全 PRN 棄却)
+- rover は VRS 仮想座標 + 1077 MSM7 + 1005 のみで RTK fix を試みる
+
+これは「FKP 補正なしの VRS」相当で、本来の Network RTK 効果は薄い。
+Phase 7 で本物の FKP が動くまで暫定状態として扱う。

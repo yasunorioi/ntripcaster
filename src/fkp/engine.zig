@@ -26,8 +26,8 @@ pub const BETA: f64 = F2 * F2 / (F1 * F1 - F2 * F2); // ≈ 1.5457
 /// 真因は `computeFkp` が LIF を「衛星-局の geometric range を引いた
 /// double-difference 残差」ではなく生の搬送波位相観測値で計算しており、
 /// 衛星-局距離の km スケール勾配がそのまま FKP 係数に乗ってしまう構造的
-/// 問題 (docs/phase6-design.md § 1 参照)。本 Phase 6a 修正は safety net で、
-/// 根本対応は Phase 6b (geometric range removal) で行う。
+/// 問題 (docs/phase6-design.md § 1 参照)。本閾値は safety net で、根本
+/// 対応には ephemeris ベースの geometric range 計算が要る (Phase 7)。
 pub const DEFAULT_FKP_MAX_MAGNITUDE: f64 = 100.0;
 
 /// `computeFkp` の追加オプション。各フィールドはデフォルト値があるため
@@ -59,7 +59,7 @@ pub const FkpParam = struct {
     e_0: f64, // 東方向
 };
 
-/// 1 衛星の L1/L2 位相観測値 [m]
+/// 1 衛星の L1/L2 位相観測値 [m]。
 pub const SatObs = struct {
     prn: u8,
     l1_m: ?f64,
@@ -191,9 +191,9 @@ pub fn computeFkp(
         // Phase 6a: 物理妥当性チェック。computeFkp の入力 (= 生の搬送波位相
         // 観測値) には衛星-局距離の km スケール勾配が含まれるため、3 局
         // triangle が縮退気味だと FkpParam が物理的にあり得ない大きさになる
-        // 構造的問題がある (docs/phase6-design.md § 1)。本格的な修正は
-        // Phase 6b 以降で geometric range removal を入れるが、当面の safety
-        // net として閾値超過の PRN は出力に含めない。
+        // 構造的問題がある (docs/phase6-design.md § 1)。根本対応は Phase 7
+        // (ephemeris + DD + LAMBDA) で行うが、当面の safety net として閾値
+        // 超過の PRN は出力に含めない。
         const max_abs = @max(@max(@abs(n_i), @abs(e_i)), @max(@abs(n_0), @abs(e_0)));
         if (max_abs > options.max_magnitude) {
             if (options.stats) |s| s.dropped_excess += 1;

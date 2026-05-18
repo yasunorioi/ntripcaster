@@ -56,7 +56,7 @@ pub fn gpsFreqFromSigId(sig_id: u32) f64 {
 /// 1衛星・1シグナルの搬送波位相観測値
 pub const PhaseObs = struct {
     prn: u8,
-    /// 搬送波位相 [m]
+    /// 搬送波位相 [m] = (rough_int + rough_mod/1024 + fine_phase·2^-29) × c × 1e-3
     phase_m: f64,
     /// シグナル周波数 [Hz]
     freq_hz: f64,
