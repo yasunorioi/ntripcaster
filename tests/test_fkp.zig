@@ -9,6 +9,44 @@ const fkp_type59 = ntripcaster.fkp.type59;
 const fkp_runtime = ntripcaster.fkp.runtime;
 const fkp_vrs = ntripcaster.fkp.vrs;
 const fkp_eph = ntripcaster.fkp.ephemeris;
+const fkp_orbit = ntripcaster.fkp.orbit;
+
+/// 全フィールドをゼロで埋めた GpsEphemeris。テスト個別で必要な値だけ後から
+/// 上書きする (構造体リテラル冗長化を避ける)。
+fn zeroGpsEph() fkp_eph.GpsEphemeris {
+    return .{
+        .prn = 0,
+        .week_mod1024 = 0,
+        .sv_acc = 0,
+        .code_on_l2 = 0,
+        .iode = 0,
+        .iodc = 0,
+        .sv_health = 0,
+        .l2p_flag = 0,
+        .fit_interval_flag = 0,
+        .toc_s = 0,
+        .toe_s = 0,
+        .af0_s = 0,
+        .af1_s_per_s = 0,
+        .af2_s_per_s2 = 0,
+        .crs_m = 0,
+        .crc_m = 0,
+        .cuc_rad = 0,
+        .cus_rad = 0,
+        .cic_rad = 0,
+        .cis_rad = 0,
+        .dn_rad_per_s = 0,
+        .m0_rad = 0,
+        .ecc = 0,
+        .sqrt_a_m = 5153.6,
+        .omega0_rad = 0,
+        .omdot_rad_per_s = 0,
+        .i0_rad = 0,
+        .idot_rad_per_s = 0,
+        .argp_rad = 0,
+        .tgd_s = 0,
+    };
+}
 
 // ── BitReader / BitWriter ─────────────────────────────────────────────────────
 
@@ -1251,4 +1289,146 @@ test "fkp: parseMsg1019 + EphemerisStore integration" {
     // toc/toe = 6300 × 16 = 100800 s
     try std.testing.expectApproxEqAbs(@as(f64, 100800.0), got.eph.toc_s, 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 100800.0), got.eph.toe_s, 1e-9);
+}
+
+// ── Phase 7-2: GPS satellite ECEF propagator + light-time + sat clock ─────
+
+test "fkp.orbit: gpsSatEcef circular orbit at toe places sat at (a, 0, 0)" {
+    // ecc=0, omdot=0, idot=0, 摂動全ゼロ、toe=0, m0=0, argp=0, omega0=0, i0=0
+    // → 真近点角 v=0, 引数 u=0, xp=a, yp=0, omega=0, incl=0
+    // → ECEF = (a·1, a·0, 0) = (a, 0, 0)
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.79; // realistic GPS semi-major axis ~ 26561 km
+    const pos = fkp_orbit.gpsSatEcef(eph, 0.0);
+
+    const a = eph.sqrt_a_m * eph.sqrt_a_m;
+    try std.testing.expectApproxEqAbs(a, pos.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), pos.y, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), pos.z, 1e-6);
+}
+
+test "fkp.orbit: gpsSatEcef magnitude equals semi-major axis when ecc=0" {
+    // ecc=0 / 摂動ゼロでも omega0/i0/m0 を任意に振ると ECEF は (a·cos, a·sin) 平面に
+    // 乗るが magnitude は a。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.6;
+    eph.m0_rad = 1.234;
+    eph.omega0_rad = 0.5;
+    eph.i0_rad = 0.9;
+    eph.argp_rad = -0.3;
+
+    const pos = fkp_orbit.gpsSatEcef(eph, 0.0);
+    const a = eph.sqrt_a_m * eph.sqrt_a_m;
+    const r = std.math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z);
+    try std.testing.expectApproxEqAbs(a, r, 1e-3);
+}
+
+test "fkp.orbit: gpsSatEcef Kepler residual is below 1e-12 (ecc=0.05)" {
+    // 偏心が大きい衛星 (実 GPS は ecc ≲ 0.02 だが LEO 等を想定し 0.05) でも
+    // Newton 反復で M = E - e·sin(E) 残差が 1e-12 rad 以下に収束する。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.6;
+    eph.ecc = 0.05;
+    eph.m0_rad = 0.7; // arbitrary mean anomaly
+    const pos = fkp_orbit.gpsSatEcef(eph, 0.0);
+    const ek = pos.eccentric_anomaly_rad;
+    const mk = eph.m0_rad; // at t_sow=0, toe=0 → tk=0, n·tk=0 → mk=m0
+    const residual = ek - eph.ecc * @sin(ek) - mk;
+    try std.testing.expect(@abs(residual) < 1e-12);
+}
+
+test "fkp.orbit: gpsSatEcef week wrap (tk - SECONDS_PER_WEEK) preserves trajectory" {
+    // 同じ衛星位置を t_sow = toe + 100 と t_sow = toe + 100 + SECONDS_PER_WEEK
+    // で計算した場合、week wrap 補正で tk が ±302400 s 範囲に折り返される
+    // → 結果は (ほぼ) 同一。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.6;
+    eph.ecc = 0.01;
+    eph.toe_s = 100000.0;
+    const a_pos = fkp_orbit.gpsSatEcef(eph, eph.toe_s + 100.0);
+    const b_pos = fkp_orbit.gpsSatEcef(eph, eph.toe_s + 100.0 + fkp_orbit.SECONDS_PER_WEEK);
+    try std.testing.expectApproxEqAbs(a_pos.x, b_pos.x, 1e-6);
+    try std.testing.expectApproxEqAbs(a_pos.y, b_pos.y, 1e-6);
+    try std.testing.expectApproxEqAbs(a_pos.z, b_pos.z, 1e-6);
+}
+
+test "fkp.orbit: satClockBiasGps polynomial term at dt=0 equals af0" {
+    var eph = zeroGpsEph();
+    eph.af0_s = 1.5e-4;
+    eph.af1_s_per_s = 1.0e-9;
+    eph.af2_s_per_s2 = 0;
+    eph.toc_s = 200.0;
+    // ecc=0 → 相対論項ゼロ、tgd_apply=false → tgd 影響なし
+    const bias = fkp_orbit.satClockBiasGps(eph, 200.0, 0.0, false);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5e-4), bias, 1e-15);
+}
+
+test "fkp.orbit: satClockBiasGps adds relativistic correction with non-zero ecc" {
+    var eph = zeroGpsEph();
+    eph.af0_s = 0;
+    eph.ecc = 0.01;
+    eph.sqrt_a_m = 5153.6;
+    const ek = 1.0; // arbitrary, sin(1)=0.841
+    const bias = fkp_orbit.satClockBiasGps(eph, 0.0, ek, false);
+    // F·e·sqrtA·sin(E) = -4.4428e-10 × 0.01 × 5153.6 × sin(1)
+    const expected = fkp_orbit.RELATIVISTIC_F * 0.01 * 5153.6 * @sin(@as(f64, 1.0));
+    try std.testing.expectApproxEqAbs(expected, bias, 1e-15);
+    try std.testing.expect(@abs(bias) > 1e-10); // 物理的に妥当な non-zero 値
+}
+
+test "fkp.orbit: satClockBiasGps subtracts tgd when tgd_apply=true" {
+    var eph = zeroGpsEph();
+    eph.tgd_s = 3e-9;
+    const bias_with = fkp_orbit.satClockBiasGps(eph, 0.0, 0.0, true);
+    const bias_without = fkp_orbit.satClockBiasGps(eph, 0.0, 0.0, false);
+    try std.testing.expectApproxEqAbs(@as(f64, -3e-9), bias_with - bias_without, 1e-18);
+}
+
+test "fkp.orbit: geometricRangeGps converges + plausible GPS τ (~67-87 ms)" {
+    // 衛星を toe=0, t_recv=0 で (a, 0, 0) 付近に置き、station を (R_earth, 0, 0)
+    // (= ECEF 上の北極/赤道交点付近) に置く。距離 ≈ a − R_earth ≈ 20.18 Mm、
+    // τ ≈ 67.3 ms。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.79;
+    // omdot - Ωe = -Ωe にしたいので omdot=0 のままで OK (toe=0 で omega=0)
+    const sta_ecef: [3]f64 = .{ 6378137.0, 0.0, 0.0 };
+    const gr = fkp_orbit.geometricRangeGps(eph, 0.0, sta_ecef);
+
+    // τ は 60-90 ms レンジ
+    try std.testing.expect(gr.tau_s > 0.06);
+    try std.testing.expect(gr.tau_s < 0.09);
+
+    // ρ = c × τ 整合性
+    try std.testing.expectApproxEqAbs(
+        fkp_orbit.C_LIGHT * gr.tau_s,
+        gr.rho_m,
+        1e-3,
+    );
+
+    // ρ は ~20 Mm (a - R_earth)
+    const a = eph.sqrt_a_m * eph.sqrt_a_m;
+    const expected_rho = a - 6378137.0;
+    try std.testing.expectApproxEqAbs(expected_rho, gr.rho_m, 5e5); // ±500 km の余裕
+}
+
+test "fkp.orbit: geometricRangeGps applies Earth rotation correction" {
+    // 同じ eph + station で τ=0 を仮定した raw sat ECEF と、light-time 計算結果を
+    // 比較し、|sat_corrected − sat_raw| が Ωe·τ·a ≈ 145 m スケールであることを確認。
+    var eph = zeroGpsEph();
+    eph.sqrt_a_m = 5153.79;
+    eph.m0_rad = 1.0; // sat を x 軸から離す
+    const sta_ecef: [3]f64 = .{ 6378137.0, 0.0, 0.0 };
+    const gr = fkp_orbit.geometricRangeGps(eph, 0.0, sta_ecef);
+
+    // 受信時刻の "uncorrected" sat ECEF
+    const sat_raw = fkp_orbit.gpsSatEcef(eph, 0.0);
+
+    const dx = gr.sat_ecef_corrected[0] - sat_raw.x;
+    const dy = gr.sat_ecef_corrected[1] - sat_raw.y;
+    const dz = gr.sat_ecef_corrected[2] - sat_raw.z;
+    const drift = std.math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Ωe ≈ 7.29e-5、τ ≈ 0.07-0.08、a ≈ 2.66e7 → 補正量 ≈ 130-150 m スケール
+    try std.testing.expect(drift > 10.0);
+    try std.testing.expect(drift < 1000.0);
 }
