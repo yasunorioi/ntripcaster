@@ -314,7 +314,7 @@ fn runOneFkpCycle(rt: *Runtime) void {
     const alloc = arena.allocator();
 
     // 全上流からスナップショット取得
-    var stations = std.ArrayList(engine.StationObs){};
+    var stations = std.ArrayList(engine.StationObs).empty;
 
     // 上流ごとの snapshot を一旦保持 (deinit で arena が解放)
     for (rt.upstreams) |u| {

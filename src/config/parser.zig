@@ -185,7 +185,7 @@ fn parseMountLine(
     const users_str = line[colon_pos.? + 1 ..];
 
     // ユーザーリストを "," で分割し各 "user:pass" をパース
-    var users = std.ArrayList(User){};
+    var users = std.ArrayList(User).empty;
     var cred_iter = std.mem.splitScalar(u8, users_str, ',');
     while (cred_iter.next()) |cred| {
         const cred_trimmed = std.mem.trim(u8, cred, " \t");
@@ -273,7 +273,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
         .mounts = std.StringHashMap(MountAuth).init(allocator),
     };
 
-    var fkp_src_list = std.ArrayList(FkpSource){};
+    var fkp_src_list = std.ArrayList(FkpSource).empty;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |raw_line| {

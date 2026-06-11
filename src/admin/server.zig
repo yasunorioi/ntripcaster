@@ -166,7 +166,7 @@ fn handleSse(stream: std.net.Stream, admin: *AdminState) !void {
         defer arena.deinit();
         const a = arena.allocator();
 
-        var body = std.ArrayList(u8){};
+        var body = std.ArrayList(u8).empty;
         body.appendSlice(a, "data: ") catch return;
         stats.writeSnapshotJson(&body, a, admin.state, VERSION, admin.server_started_at_ms) catch |err| {
             admin.state.logger.warn("SSE serialize error: {}", .{err});
@@ -294,7 +294,7 @@ fn sendJsonBody(stream: std.net.Stream, admin: *AdminState, writer: *const JsonW
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var body = std.ArrayList(u8){};
+    var body = std.ArrayList(u8).empty;
     writer(&body, alloc, admin) catch |err| {
         try sendStatus(stream, 500, "Internal Server Error", "text/plain", "stats error\n");
         admin.state.logger.warn("stats writer error: {}", .{err});

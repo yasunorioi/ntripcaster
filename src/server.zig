@@ -359,7 +359,7 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState, is_v2: b
     };
 
     // 接続中ソースの SourceEntry を収集（source_lock → msg_lock 順でロック）
-    var entries = std.ArrayList(sourcetable_mod.SourceEntry){};
+    var entries = std.ArrayList(sourcetable_mod.SourceEntry).empty;
     {
         state.source_lock.lock();
         defer state.source_lock.unlock();
@@ -369,7 +369,7 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState, is_v2: b
             const fmt: []const u8 = if (src.rtcm_detected) "RTCM 3.2" else "";
 
             // format_details: "{msg_type}({count}),..." 形式
-            var details = std.ArrayList(u8){};
+            var details = std.ArrayList(u8).empty;
             {
                 src.msg_lock.lock();
                 defer src.msg_lock.unlock();

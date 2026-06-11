@@ -642,7 +642,7 @@ fn applyVrsPhaseCorrection(
     const rover_lon_rad = rover.lon_deg * std.math.pi / 180.0;
     rover.lock.unlock();
 
-    var deltas = std.ArrayList(msm7.PhaseDelta){};
+    var deltas = std.ArrayList(msm7.PhaseDelta).empty;
     defer deltas.deinit(alloc);
     computePhaseDelta(&deltas, alloc, snap, rover_lat_rad, rover_lon_rad) catch {
         rover.frames_correction_failed += 1;
@@ -842,7 +842,7 @@ test "vrs: forwardFiltered drops Type 1005/1006/59, forwards + rewrites ref_id o
     defer arena.deinit();
     const a = arena.allocator();
 
-    var input: std.ArrayListUnmanaged(u8) = .{};
+    var input: std.ArrayListUnmanaged(u8) = .empty;
     // 1077 (forward+rewrite) → 1005 (drop) → 1019 (forward, no rewrite)
     //   → 59 (drop) → 1006 (drop) → 1087 (forward+rewrite)
     try makeDummyFrame(&input, a, 1077);
@@ -852,7 +852,7 @@ test "vrs: forwardFiltered drops Type 1005/1006/59, forwards + rewrites ref_id o
     try makeDummyFrame(&input, a, 1006);
     try makeDummyFrame(&input, a, 1087);
 
-    var captured: std.ArrayListUnmanaged(u8) = .{};
+    var captured: std.ArrayListUnmanaged(u8) = .empty;
     const writer = CaptureWriter{ .buf = &captured, .alloc = a };
     var rover = makeTestRover(a);
 
@@ -896,7 +896,7 @@ test "vrs: rewriteRefIdInFrame keeps msg_type, updates ref_id, refreshes CRC" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var input: std.ArrayListUnmanaged(u8) = .{};
+    var input: std.ArrayListUnmanaged(u8) = .empty;
     try makeDummyFrame(&input, a, 1077); // makeDummyFrame は ref_id=0 で作る
     rewriteRefIdInFrame(input.items, 0x801);
 
@@ -933,7 +933,7 @@ test "vrs: forwardFiltered drops real encoded 1005 frame" {
     const a = arena.allocator();
 
     const real_1005 = try msm7.encodeMsg1005(a, 1, .{ -3949000.123, 3357000.456, 3700000.789 }, false);
-    var captured: std.ArrayListUnmanaged(u8) = .{};
+    var captured: std.ArrayListUnmanaged(u8) = .empty;
     const writer = CaptureWriter{ .buf = &captured, .alloc = a };
     var rover = makeTestRover(a);
 
@@ -949,12 +949,12 @@ test "vrs: forwardFiltered stops at incomplete trailing frame" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var input: std.ArrayListUnmanaged(u8) = .{};
+    var input: std.ArrayListUnmanaged(u8) = .empty;
     try makeDummyFrame(&input, a, 1077); // 完全 9-byte frame (forward+rewrite)
     // 中途半端な 2 番目のフレームヘッダだけ (preamble + len_hi のみ)
     try input.appendSlice(a, &.{ 0xD3, 0x00 });
 
-    var captured: std.ArrayListUnmanaged(u8) = .{};
+    var captured: std.ArrayListUnmanaged(u8) = .empty;
     const writer = CaptureWriter{ .buf = &captured, .alloc = a };
     var rover = makeTestRover(a);
 

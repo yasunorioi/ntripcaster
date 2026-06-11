@@ -74,7 +74,7 @@ pub fn buildCasterHeader(
     caster: CasterInfo,
     network: ?NetworkInfo,
 ) ![]u8 {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
 
     const cas = try std.fmt.allocPrint(
@@ -137,7 +137,7 @@ pub fn buildResponse(
     _ = server_name; // Server ヘッダーには CASTER_VERSION のみ埋め込む
 
     // ボディ = sourcetable.dat 内容 + 動的STR行 + "ENDSOURCETABLE\r\n"
-    var full_body = std.ArrayList(u8){};
+    var full_body = std.ArrayList(u8).empty;
     defer full_body.deinit(allocator);
 
     if (body.len > 0) {
@@ -193,7 +193,7 @@ pub fn buildResponseV2(
 ) ![]u8 {
     _ = server_name;
 
-    var full_body = std.ArrayList(u8){};
+    var full_body = std.ArrayList(u8).empty;
     defer full_body.deinit(allocator);
 
     if (body.len > 0) {

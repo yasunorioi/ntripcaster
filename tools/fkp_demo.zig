@@ -84,7 +84,7 @@ fn collectStation(
     var parse_len: usize = 0;
 
     var coord: ?msm7.StationCoord = null;
-    var all_obs = std.ArrayList(msm7.PhaseObs){};
+    var all_obs = std.ArrayList(msm7.PhaseObs).empty;
 
     const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
 

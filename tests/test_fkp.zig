@@ -809,7 +809,7 @@ test "fkp: computePhaseDelta single PRN produces expected delta" {
     const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
     defer snap.deinit(std.testing.allocator);
 
-    var deltas = std.ArrayList(fkp_msm7.PhaseDelta){};
+    var deltas = std.ArrayList(fkp_msm7.PhaseDelta).empty;
     defer deltas.deinit(std.testing.allocator);
     try fkp_vrs.computePhaseDelta(&deltas, std.testing.allocator, snap, 0.001, 0.0005);
 
@@ -840,7 +840,7 @@ test "fkp: computePhaseDelta multiple PRNs returns one entry per param" {
     const snap = store.snapshot(std.testing.allocator) orelse return error.NoSnapshot;
     defer snap.deinit(std.testing.allocator);
 
-    var deltas = std.ArrayList(fkp_msm7.PhaseDelta){};
+    var deltas = std.ArrayList(fkp_msm7.PhaseDelta).empty;
     defer deltas.deinit(std.testing.allocator);
     try fkp_vrs.computePhaseDelta(&deltas, std.testing.allocator, snap, 0.001, 0.0005);
 
@@ -882,7 +882,7 @@ test "fkp: computePhaseDelta + applyPhaseCorrection end-to-end on MSM7 frame" {
 
     // rover at (0.001, 0.0005) rad
     // delta_m = (5+3)·0.001 + (2+1)·0.0005 = 0.008 + 0.0015 = 0.0095 m
-    var deltas = std.ArrayList(fkp_msm7.PhaseDelta){};
+    var deltas = std.ArrayList(fkp_msm7.PhaseDelta).empty;
     defer deltas.deinit(alloc);
     try fkp_vrs.computePhaseDelta(&deltas, alloc, snap, 0.001, 0.0005);
 

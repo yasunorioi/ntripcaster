@@ -67,7 +67,7 @@ pub fn extractCredentials(header_value: []const u8, buf: []u8) AuthError!Credent
     if (!std.mem.startsWith(u8, header_value, prefix)) return error.InvalidHeader;
 
     // プレフィックス除去 + 末尾空白トリム
-    const encoded = std.mem.trimRight(u8, header_value[prefix.len..], " \t\r\n");
+    const encoded = std.mem.trimEnd(u8, header_value[prefix.len..], " \t\r\n");
 
     const decoded = try decodeBase64(encoded, buf);
     return parseCredentials(decoded) orelse error.MissingColon;

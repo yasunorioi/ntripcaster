@@ -225,7 +225,7 @@ fn writeKeyFloat(
 // ── テスト ─────────────────────────────────────────────────────────────────
 
 test "appendQuoted: escapes control + special chars" {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(std.testing.allocator);
     try appendQuoted(&buf, std.testing.allocator, "a\"b\\c\nd\te\x01");
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\te\\u0001\"", buf.items);

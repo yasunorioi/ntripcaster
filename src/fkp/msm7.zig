@@ -248,7 +248,7 @@ pub fn extractPhase(
     }
 
     // ── 出力構築 ──────────────────────────────────────────────────────
-    var obs_list = std.ArrayList(PhaseObs){};
+    var obs_list = std.ArrayList(PhaseObs).empty;
     defer obs_list.deinit(allocator);
 
     for (0..ncell_valid) |j| {

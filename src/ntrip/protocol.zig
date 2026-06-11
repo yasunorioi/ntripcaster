@@ -117,7 +117,7 @@ fn expectsContinue(header: []const u8) bool {
 fn parseSourceLoginV1(header: []const u8) ?SourceLogin {
     // 最初の行を取り出す
     const line_end = std.mem.indexOfScalar(u8, header, '\n') orelse return null;
-    const first_line = std.mem.trimRight(u8, header[0..line_end], " \r");
+    const first_line = std.mem.trimEnd(u8, header[0..line_end], " \r");
 
     // "SOURCE " は 7 文字。以降が "<password> /<mount>"
     if (first_line.len < 8) return null;
@@ -141,7 +141,7 @@ fn parseSourceLoginV1(header: []const u8) ?SourceLogin {
 /// "POST /<mount> HTTP/1.1\r\nNtrip-Version: ...\r\n..." (NTRIP v2) をパースする。
 fn parseSourceLoginV2(header: []const u8) ?SourceLogin {
     const line_end = std.mem.indexOfScalar(u8, header, '\n') orelse return null;
-    const first_line = std.mem.trimRight(u8, header[0..line_end], " \r");
+    const first_line = std.mem.trimEnd(u8, header[0..line_end], " \r");
 
     // "POST " は 5 文字
     if (first_line.len < 6) return null;
@@ -171,7 +171,7 @@ fn parseSourceLoginV2(header: []const u8) ?SourceLogin {
 /// "GET /<path> HTTP/1.x\r\n..." をパースする。
 fn parseGetRequest(header: []const u8) NtripRequest {
     const line_end = std.mem.indexOfScalar(u8, header, '\n') orelse return .{ .invalid = header };
-    const first_line = std.mem.trimRight(u8, header[0..line_end], " \r");
+    const first_line = std.mem.trimEnd(u8, header[0..line_end], " \r");
 
     // "GET " は 4 文字
     if (first_line.len < 5) return .{ .invalid = header };

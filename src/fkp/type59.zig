@@ -114,7 +114,7 @@ pub fn decodeType59(
     _ = br.readU(1); // multiple message
     const nsat: usize = @intCast(br.readU(6));
 
-    var list = std.ArrayList(engine.FkpParam){};
+    var list = std.ArrayList(engine.FkpParam).empty;
     for (0..nsat) |_| {
         const prn: u8 = @truncate(br.readU(8));
         const n_i = @as(f64, @floatFromInt(br.readS(16))) / SCALE_I;

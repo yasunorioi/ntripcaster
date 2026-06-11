@@ -11,14 +11,14 @@ const server_mod = ntripcaster.server;
 // ── stats.zig: appendQuoted ──────────────────────────────────────────────────
 
 test "stats: appendQuoted escapes specials" {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(std.testing.allocator);
     try stats.appendQuoted(&buf, std.testing.allocator, "a\"b\\c\nd\te");
     try std.testing.expectEqualStrings("\"a\\\"b\\\\c\\nd\\te\"", buf.items);
 }
 
 test "stats: appendQuoted escapes control byte as \\u00XX" {
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(std.testing.allocator);
     try stats.appendQuoted(&buf, std.testing.allocator, "x\x01y");
     try std.testing.expectEqualStrings("\"x\\u0001y\"", buf.items);
@@ -40,7 +40,7 @@ test "stats: writeStatusJson emits expected keys" {
     // listen_address はテストでは未設定なので適当な値を入れる
     state.listen_address = try std.net.Address.parseIp4("127.0.0.1", 2101);
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     try stats.writeStatusJson(&out, alloc, &state, "0.2.1", 1234);
 
@@ -61,7 +61,7 @@ test "stats: writeSourcesJson empty" {
     var state = server_mod.ServerState.init(alloc, &config, ".");
     defer state.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     try stats.writeSourcesJson(&out, alloc, &state);
     try std.testing.expectEqualStrings("[]", out.items);
@@ -83,7 +83,7 @@ test "stats: writeSourcesJson station field is null when no 1005 received" {
         src.destroy();
     }
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     try stats.writeSourcesJson(&out, alloc, &state);
 
@@ -116,7 +116,7 @@ test "stats: writeSourcesJson exposes station lat/lon once 1005 seen" {
         src.destroy();
     }
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     try stats.writeSourcesJson(&out, alloc, &state);
 
@@ -133,7 +133,7 @@ test "stats: writeClientsJson empty" {
     var state = server_mod.ServerState.init(alloc, &config, ".");
     defer state.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
     try stats.writeClientsJson(&out, alloc, &state);
     try std.testing.expectEqualStrings("[]", out.items);

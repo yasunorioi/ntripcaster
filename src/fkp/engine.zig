@@ -96,7 +96,7 @@ pub fn groupPhaseObs(
         }
     }
 
-    var list = std.ArrayList(SatObs){};
+    var list = std.ArrayList(SatObs).empty;
     var it = map.valueIterator();
     while (it.next()) |v| {
         try list.append(allocator, v.*);
@@ -156,7 +156,7 @@ pub fn computeFkp(
     // A = [[dphi_b, dlam_b], [dphi_c, dlam_c]]
     const inv_a = invert2x2(dphi_b, dlam_b, dphi_c, dlam_c) orelse return &.{};
 
-    var fkp_list = std.ArrayList(FkpParam){};
+    var fkp_list = std.ArrayList(FkpParam).empty;
 
     for (sta_a.obs) |obs_a| {
         const prn = obs_a.prn;
@@ -296,7 +296,7 @@ pub fn groupPhaseObsEx(
         }
     }
 
-    var list = std.ArrayList(SatObsEx){};
+    var list = std.ArrayList(SatObsEx).empty;
     var it = map.valueIterator();
     while (it.next()) |v| {
         try list.append(allocator, v.*);
@@ -435,7 +435,7 @@ pub fn computeFkpDd(
     const sd_ref_l2_c = ref_res_l2_c - ref_res_l2_a;
 
     // ── 各 non-ref PRN ────────────────────────────────────────────────
-    var fkp_list = std.ArrayList(FkpParam){};
+    var fkp_list = std.ArrayList(FkpParam).empty;
 
     for (sta_a.obs) |obs_a| {
         const prn = obs_a.prn;
