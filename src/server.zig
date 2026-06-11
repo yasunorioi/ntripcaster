@@ -44,8 +44,16 @@ pub const SourceSnapshot = struct {
     last_data_at_ms: i64,
     /// (msg_type, count) の配列。アロケータで確保した owned slice。
     msg_types: []MsgTypeCount,
+    /// RTCM3 1005/1006 から取得した基準局座標。未受信なら null
+    station: ?StationSnapshot,
 
     pub const MsgTypeCount = struct { msg_type: u16, count: u32 };
+    pub const StationSnapshot = struct {
+        ref_station_id: u16,
+        lat_deg: f64,
+        lon_deg: f64,
+        antenna_height_m: f64,
+    };
 
     pub fn deinit(self: *SourceSnapshot, alloc: std.mem.Allocator) void {
         alloc.free(self.mount);
@@ -236,6 +244,13 @@ pub const ServerState = struct {
             }
             const bytes_in_snap = src.bytes_in;
             const last_data_at_snap = src.last_data_at_ms;
+            const station_snap: ?SourceSnapshot.StationSnapshot =
+                if (src.station) |sc| .{
+                    .ref_station_id = sc.ref_station_id,
+                    .lat_deg = sc.lat_deg,
+                    .lon_deg = sc.lon_deg,
+                    .antenna_height_m = sc.antenna_height_m,
+                } else null;
             src.msg_lock.unlock();
 
             out[i] = .{
@@ -247,6 +262,7 @@ pub const ServerState = struct {
                 .started_at_ms = src.started_at_ms,
                 .last_data_at_ms = last_data_at_snap,
                 .msg_types = mt_buf,
+                .station = station_snap,
             };
         }
         return out;

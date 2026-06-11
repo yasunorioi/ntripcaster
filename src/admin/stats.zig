@@ -118,6 +118,20 @@ pub fn writeSourcesJson(
             try out.append(alloc, '}');
         }
         try out.append(alloc, ']');
+
+        // station: {"ref_id":N,"lat":..,"lon":..,"alt":..}  or null
+        try out.appendSlice(alloc, ",\"station\":");
+        if (s.station) |st| {
+            try out.append(alloc, '{');
+            try writeKeyInt(out, alloc, "\"ref_id\":", @as(i64, st.ref_station_id));
+            try writeKeyFloat(out, alloc, ",\"lat\":", st.lat_deg);
+            try writeKeyFloat(out, alloc, ",\"lon\":", st.lon_deg);
+            try writeKeyFloat(out, alloc, ",\"alt\":", st.antenna_height_m);
+            try out.append(alloc, '}');
+        } else {
+            try out.appendSlice(alloc, "null");
+        }
+
         try out.append(alloc, '}');
     }
     try out.append(alloc, ']');
@@ -194,6 +208,18 @@ fn writeKeyBool(
 ) !void {
     try out.appendSlice(alloc, key_with_punct);
     try out.appendSlice(alloc, if (value) "true" else "false");
+}
+
+fn writeKeyFloat(
+    out: *std.ArrayList(u8),
+    alloc: std.mem.Allocator,
+    key_with_punct: []const u8,
+    value: f64,
+) !void {
+    try out.appendSlice(alloc, key_with_punct);
+    var buf: [48]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buf, "{d:.6}", .{value});
+    try out.appendSlice(alloc, s);
 }
 
 // ── テスト ─────────────────────────────────────────────────────────────────

@@ -67,6 +67,65 @@ test "stats: writeSourcesJson empty" {
     try std.testing.expectEqualStrings("[]", out.items);
 }
 
+test "stats: writeSourcesJson station field is null when no 1005 received" {
+    const source_mod = ntripcaster.ntrip.source;
+    const alloc = std.testing.allocator;
+    var config = try parser.parse(alloc, "");
+    defer config.deinit();
+    var state = server_mod.ServerState.init(alloc, &config, ".");
+    defer state.deinit();
+
+    const peer = try std.net.Address.parseIp4("127.0.0.1", 1234);
+    const src = try source_mod.Source.create(alloc, "/M1", peer);
+    try state.registerSource(src);
+    defer {
+        state.unregisterSource("/M1");
+        src.destroy();
+    }
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(alloc);
+    try stats.writeSourcesJson(&out, alloc, &state);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"station\":null") != null);
+}
+
+test "stats: writeSourcesJson exposes station lat/lon once 1005 seen" {
+    const source_mod = ntripcaster.ntrip.source;
+    const rtcm3 = ntripcaster.ntrip.rtcm3;
+    const alloc = std.testing.allocator;
+    var config = try parser.parse(alloc, "");
+    defer config.deinit();
+    var state = server_mod.ServerState.init(alloc, &config, ".");
+    defer state.deinit();
+
+    const peer = try std.net.Address.parseIp4("127.0.0.1", 5678);
+    const src = try source_mod.Source.create(alloc, "/SAP", peer);
+    src.station = rtcm3.StationCoord{
+        .ref_station_id = 7,
+        .x = 0,
+        .y = 0,
+        .z = 0,
+        .lat_deg = 43.0686,
+        .lon_deg = 141.3506,
+        .antenna_height_m = 5.0,
+    };
+    try state.registerSource(src);
+    defer {
+        state.unregisterSource("/SAP");
+        src.destroy();
+    }
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(alloc);
+    try stats.writeSourcesJson(&out, alloc, &state);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"station\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"ref_id\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"lat\":43.0686") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"lon\":141.3506") != null);
+}
+
 test "stats: writeClientsJson empty" {
     const alloc = std.testing.allocator;
     var config = try parser.parse(alloc, "");
