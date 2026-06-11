@@ -186,16 +186,24 @@ zig build -Dtarget=x86_64-linux-musl
 
 ## Install
 
+ビルド成果物 (`zig-out/bin/ntripcaster`) をそのまま配布するか、パッケージ生成して導入する:
+
 ```bash
-# /usr/local/bin + /etc/ntripcaster/conf にインストール
-sudo make install
+# Debian/Ubuntu パッケージ (.deb)
+make package-deb ARCH=amd64
 
-# Debian/Ubuntu パッケージ生成 (.deb)
-make deb
+# RPM パッケージ
+make package-rpm ARCH=x86_64
 
-# RPM パッケージ生成
-make rpm
+# OpenWrt パッケージ (.ipk)
+make package-opkg ARCH=x86_64
+
+# 上記 3 つをまとめて
+make packages
 ```
+
+成果物は `*.deb` / `*.rpm` / `*.ipk` としてリポジトリルートに出力される。
+`ARCH` を省略すると `dpkg --print-architecture` の結果 (なければ `amd64`) が使われる。
 
 ## systemd 運用
 
