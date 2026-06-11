@@ -310,17 +310,37 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState, is_v2: b
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const st_path = std.fmt.allocPrint(
-        alloc,
-        "{s}/sourcetable.dat",
-        .{state.conf_dir},
-    ) catch {
+    // CAS / NET 行を config から組み立てる（旧 sourcetable.dat の置き換え）
+    const cfg = state.config;
+    const caster_host = if (cfg.caster_host.len > 0) cfg.caster_host else cfg.server_name;
+    const caster_info = sourcetable_mod.CasterInfo{
+        .host = caster_host,
+        .port = cfg.port,
+        .identifier = cfg.caster_identifier,
+        .operator = cfg.caster_operator,
+        .nmea = cfg.caster_nmea,
+        .country = cfg.caster_country,
+        .latitude = cfg.caster_latitude,
+        .longitude = cfg.caster_longitude,
+        .fallback_host = cfg.caster_fallback_host,
+        .fallback_port = cfg.caster_fallback_port,
+        .misc = cfg.caster_misc,
+    };
+    const network_info: ?sourcetable_mod.NetworkInfo = if (cfg.network_identifier.len > 0) .{
+        .identifier = cfg.network_identifier,
+        .operator = cfg.network_operator,
+        .auth = cfg.network_auth,
+        .fee = cfg.network_fee,
+        .web_net = cfg.network_web_net,
+        .web_str = cfg.network_web_str,
+        .web_reg = cfg.network_web_reg,
+        .misc = cfg.network_misc,
+    } else null;
+
+    const body = sourcetable_mod.buildCasterHeader(alloc, caster_info, network_info) catch {
         sendBadRequest(stream);
         return;
     };
-
-    const maybe_body = sourcetable_mod.readFile(alloc, st_path) catch null;
-    const body = maybe_body orelse "";
 
     // 接続中ソースの SourceEntry を収集（source_lock → msg_lock 順でロック）
     var entries = std.ArrayList(sourcetable_mod.SourceEntry){};

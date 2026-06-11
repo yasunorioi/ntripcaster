@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ---
 
+## [Unreleased]
+
+### 変更
+
+- **Sourcetable CAS/NET 自動生成**: 手書き `conf/sourcetable.dat` を廃止。
+  CAS 行 (`CAS;host;port;identifier;operator;nmea;country;lat;lon;...`) と
+  NET 行は `caster_*` / `network_*` 設定キーから自動組み立てる。
+  - 新しい設定キー: `caster_identifier` / `caster_operator` / `caster_nmea` /
+    `caster_country` / `caster_latitude` / `caster_longitude` /
+    `caster_fallback_host` / `caster_fallback_port` / `caster_misc` /
+    `caster_host` (空なら `server_name` を使用)
+  - NET 行は `network_identifier` が非空のとき自動付加 (`network_operator` /
+    `network_auth` / `network_fee` / `network_web_net` / `network_web_str` /
+    `network_web_reg` / `network_misc`)
+  - STR 行は従来通り接続中 source から動的生成
+  - `sourcetable.zig` に `CasterInfo` / `NetworkInfo` 構造体と
+    `buildCasterHeader()` を追加。`readFile()` は削除。
+
+---
+
 ## [0.5.0] — 2026-05-18 — NTRIP v2 protocol support
 
 NTRIP v2 (HTTP/1.1 ベース) のプロトコル対応を追加。v1 (ICY 200 OK) 互換は維持。

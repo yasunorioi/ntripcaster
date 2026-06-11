@@ -62,6 +62,34 @@ pub const Config = struct {
     rp_email: []const u8 = "",
     server_url: []const u8 = "",
 
+    // ── Sourcetable CAS レコード（自動生成） ──────────────────────────────
+    /// CAS 行 host フィールド (空なら server_name を使う)
+    caster_host: []const u8 = "",
+    caster_identifier: []const u8 = "NtripCaster",
+    caster_operator: []const u8 = "",
+    /// NMEA: 0 = caster は NMEA を要求しない / 1 = 要求する
+    caster_nmea: u8 = 0,
+    /// 3 文字 ISO 国コード（例: "JPN", "DEU"）
+    caster_country: []const u8 = "",
+    caster_latitude: f64 = 0.0,
+    caster_longitude: f64 = 0.0,
+    caster_fallback_host: []const u8 = "",
+    caster_fallback_port: u16 = 0,
+    caster_misc: []const u8 = "",
+
+    // ── Sourcetable NET レコード（任意・自動生成） ────────────────────────
+    /// NET 行を sourcetable に含めるか（network_identifier が空でない場合に有効）
+    network_identifier: []const u8 = "",
+    network_operator: []const u8 = "",
+    /// "B" = Basic, "D" = Digest, "N" = none
+    network_auth: []const u8 = "N",
+    /// "Y" = fee, "N" = free
+    network_fee: []const u8 = "N",
+    network_web_net: []const u8 = "",
+    network_web_str: []const u8 = "",
+    network_web_reg: []const u8 = "",
+    network_misc: []const u8 = "",
+
     // ── マウント認証テーブル ──────────────────────────────────────────────
     /// キー: マウントパス（"/" で始まる）、値: MountAuth
     mounts: std.StringHashMap(MountAuth),
@@ -289,6 +317,42 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
             config.rp_email = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "server_url")) {
             config.server_url = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "caster_host")) {
+            config.caster_host = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "caster_identifier")) {
+            config.caster_identifier = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "caster_operator")) {
+            config.caster_operator = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "caster_nmea")) {
+            config.caster_nmea = std.fmt.parseInt(u8, value, 10) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "caster_country")) {
+            config.caster_country = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "caster_latitude")) {
+            config.caster_latitude = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "caster_longitude")) {
+            config.caster_longitude = std.fmt.parseFloat(f64, value) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, key, "caster_fallback_host")) {
+            config.caster_fallback_host = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "caster_fallback_port")) {
+            config.caster_fallback_port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidPort;
+        } else if (std.mem.eql(u8, key, "caster_misc")) {
+            config.caster_misc = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_identifier")) {
+            config.network_identifier = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_operator")) {
+            config.network_operator = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_auth")) {
+            config.network_auth = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_fee")) {
+            config.network_fee = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_web_net")) {
+            config.network_web_net = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_web_str")) {
+            config.network_web_str = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_web_reg")) {
+            config.network_web_reg = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "network_misc")) {
+            config.network_misc = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "admin_enable")) {
             config.admin_enable = std.mem.eql(u8, value, "true");
         } else if (std.mem.eql(u8, key, "admin_bind")) {

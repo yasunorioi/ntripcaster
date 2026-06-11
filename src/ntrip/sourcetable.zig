@@ -1,6 +1,9 @@
 //! ntrip/sourcetable.zig — Sourcetable管理・配信
 //!
 //! 原典 client.c の send_sourcetable() を Zig で再実装。
+//! CAS/NET 行は設定から自動組み立て、STR 行は live source から動的生成。
+//! 静的な sourcetable.dat ファイルは廃止（caller が CAS/NET テキストを
+//! `buildCasterHeader` で生成し、`buildResponse` の `body` に渡す）。
 //!
 //! NTRIP v1 Sourcetable レスポンス形式:
 //!   SOURCETABLE 200 OK\r\n
@@ -8,7 +11,7 @@
 //!   Content-Type: text/plain\r\n
 //!   Content-Length: {size}\r\n
 //!   \r\n
-//!   {sourcetable.dat 内容}
+//!   {body: CAS/NET ヘッダ + 動的 STR 行}
 //!   ENDSOURCETABLE\r\n
 //!
 //! NTRIP v2 Sourcetable レスポンス形式:
@@ -33,6 +36,88 @@ pub const SourceEntry = struct {
     /// フォーマット詳細（例: "1005(10),1077(1)"）。未検出の場合は空文字列。
     format_details: []const u8 = "",
 };
+
+/// NTRIP v1 sourcetable CAS レコード
+/// CAS;<host>;<port>;<identifier>;<operator>;<nmea>;<country>;<lat>;<lon>;
+///    <fallback_host>;<fallback_port>;<misc>
+pub const CasterInfo = struct {
+    host: []const u8,
+    port: u16,
+    identifier: []const u8 = "NtripCaster",
+    operator: []const u8 = "",
+    nmea: u8 = 0,
+    country: []const u8 = "",
+    latitude: f64 = 0.0,
+    longitude: f64 = 0.0,
+    fallback_host: []const u8 = "",
+    fallback_port: u16 = 0,
+    misc: []const u8 = "",
+};
+
+/// NTRIP v1 sourcetable NET レコード
+/// NET;<identifier>;<operator>;<auth>;<fee>;<web-net>;<web-str>;<web-reg>;<misc>
+pub const NetworkInfo = struct {
+    identifier: []const u8,
+    operator: []const u8 = "",
+    auth: []const u8 = "N",
+    fee: []const u8 = "N",
+    web_net: []const u8 = "",
+    web_str: []const u8 = "",
+    web_reg: []const u8 = "",
+    misc: []const u8 = "",
+};
+
+/// CAS + (任意の) NET 行を組み立てて返す。末尾は CRLF で締める。
+/// 返却値は `allocator.free()` で解放すること。
+pub fn buildCasterHeader(
+    allocator: std.mem.Allocator,
+    caster: CasterInfo,
+    network: ?NetworkInfo,
+) ![]u8 {
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(allocator);
+
+    const cas = try std.fmt.allocPrint(
+        allocator,
+        "CAS;{s};{d};{s};{s};{d};{s};{d:.2};{d:.2};{s};{d};{s};\r\n",
+        .{
+            caster.host,
+            caster.port,
+            caster.identifier,
+            caster.operator,
+            caster.nmea,
+            caster.country,
+            caster.latitude,
+            caster.longitude,
+            caster.fallback_host,
+            caster.fallback_port,
+            caster.misc,
+        },
+    );
+    defer allocator.free(cas);
+    try buf.appendSlice(allocator, cas);
+
+    if (network) |net| {
+        const net_line = try std.fmt.allocPrint(
+            allocator,
+            "NET;{s};{s};{s};{s};{s};{s};{s};{s};\r\n",
+            .{
+                net.identifier,
+                net.operator,
+                net.auth,
+                net.fee,
+                net.web_net,
+                net.web_str,
+                net.web_reg,
+                net.misc,
+            },
+        );
+        defer allocator.free(net_line);
+        try buf.appendSlice(allocator, net_line);
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
 
 /// "SOURCETABLE 200 OK" レスポンス全体を `allocator` 上に生成する。
 ///
@@ -148,18 +233,4 @@ pub fn buildResponseV2(
     );
 }
 
-/// sourcetable.dat ファイルを読み込む。
-/// ファイルが存在しない場合は null を返す（空の sourcetable で代替）。
-///
-/// 返却値: 呼び出し元が `allocator.free()` で解放すること。
-pub fn readFile(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-) !?[]u8 {
-    const file = std.fs.cwd().openFile(path, .{}) catch |e| {
-        if (e == error.FileNotFound) return null;
-        return e;
-    };
-    defer file.close();
-    return try file.readToEndAlloc(allocator, 1024 * 1024); // 1MB 上限
-}
+// readFile() は廃止: sourcetable.dat に依存せず CAS/NET は設定から組み立てる。

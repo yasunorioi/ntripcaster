@@ -74,7 +74,7 @@ pub fn main() !void {
     };
     defer config.deinit();
 
-    // conf_dir: 設定ファイルのディレクトリ（sourcetable.dat の場所）
+    // conf_dir: 設定ファイルのディレクトリ（将来 conf 相対パスを使う機能用）
     const conf_dir = std.fs.path.dirname(config_path) orelse "conf";
 
     // ── ServerState 初期化 ──────────────────────────────────────────────────

@@ -148,7 +148,7 @@ class node_tests,node_interop,node_demo toneRose
 - HTTP Basic authentication (sourcetable, per-mountpoint)
 - Ring-buffer per source stream (zero-copy relay to multiple clients)
 - Connection limit enforcement (max_clients / max_clients_per_source / max_sources)
-- Dynamic sourcetable generation from active sources
+- Sourcetable fully auto-generated: CAS / NET 行は設定ファイルから組み立て、STR 行は live source から動的生成（手書き `sourcetable.dat` 不要）
 - RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection)
 - **FKP (Flächenkorrekturparameter) live service** — 3+ NTRIP 上流に接続し、主上流の生 RTCM3 + 定期注入 Type 59 を仮想 mountpoint として配信 (Network RTK)
 - **Admin UI + JSON API** (`/api/v1/{status,sources,clients,events}`) with SSE live updates and embedded vanilla-JS dashboard

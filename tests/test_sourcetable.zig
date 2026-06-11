@@ -257,3 +257,80 @@ test "buildResponseV2: body ends with ENDSOURCETABLE" {
     const resp = try sourcetable.buildResponseV2(arena.allocator(), "", "localhost", &.{}, false);
     try std.testing.expect(std.mem.endsWith(u8, resp, "ENDSOURCETABLE\r\n"));
 }
+
+// ── buildCasterHeader (CAS/NET auto-generation, sourcetable.dat 廃止) ─────────
+
+test "buildCasterHeader: emits CAS with all 12 fields and trailing CRLF" {
+    const alloc = std.testing.allocator;
+    const cas = try sourcetable.buildCasterHeader(alloc, .{
+        .host = "caster.example.com",
+        .port = 2101,
+        .identifier = "ExampleCaster",
+        .operator = "Example Inc.",
+        .nmea = 1,
+        .country = "JPN",
+        .latitude = 43.1234,
+        .longitude = 141.5678,
+        .misc = "test",
+    }, null);
+    defer alloc.free(cas);
+
+    // CAS で始まり、改行で終わる
+    try std.testing.expect(std.mem.startsWith(u8, cas, "CAS;caster.example.com;2101;ExampleCaster;Example Inc.;1;JPN;43.12;141.57;"));
+    try std.testing.expect(std.mem.endsWith(u8, cas, "\r\n"));
+    // セパレータが 12 個（CAS + 11 fields の後）あるはず
+    var semis: usize = 0;
+    for (cas) |c| if (c == ';') { semis += 1; };
+    try std.testing.expectEqual(@as(usize, 12), semis);
+    // NET 行は出ない
+    try std.testing.expect(std.mem.indexOf(u8, cas, "NET;") == null);
+}
+
+test "buildCasterHeader: NET line emitted when network info supplied" {
+    const alloc = std.testing.allocator;
+    const out = try sourcetable.buildCasterHeader(alloc, .{
+        .host = "localhost",
+        .port = 2101,
+    }, .{
+        .identifier = "MyNet",
+        .operator = "MyOrg",
+        .auth = "B",
+        .fee = "N",
+        .web_net = "https://example.com/net",
+    });
+    defer alloc.free(out);
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "CAS;localhost;2101;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "NET;MyNet;MyOrg;B;N;https://example.com/net;;;;\r\n") != null);
+}
+
+test "buildCasterHeader: defaults render empty string fields" {
+    const alloc = std.testing.allocator;
+    const out = try sourcetable.buildCasterHeader(alloc, .{
+        .host = "h",
+        .port = 1,
+    }, null);
+    defer alloc.free(out);
+    // 連続セミコロン (空フィールド) が含まれる
+    try std.testing.expect(std.mem.indexOf(u8, out, ";;") != null);
+}
+
+test "buildCasterHeader: integrates with buildResponse as body" {
+    const alloc = std.testing.allocator;
+    const header = try sourcetable.buildCasterHeader(alloc, .{
+        .host = "caster.example.com",
+        .port = 2101,
+        .identifier = "ExampleCaster",
+        .country = "JPN",
+    }, null);
+    defer alloc.free(header);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const sources = [_]sourcetable.SourceEntry{.{ .mount = "LIVE0", .format = "RTCM 3.2" }};
+    const resp = try sourcetable.buildResponse(arena.allocator(), header, "ignored", &sources);
+
+    try std.testing.expect(std.mem.indexOf(u8, resp, "CAS;caster.example.com;2101;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, resp, "STR;LIVE0;") != null);
+    try std.testing.expect(std.mem.endsWith(u8, resp, "ENDSOURCETABLE\r\n"));
+}
