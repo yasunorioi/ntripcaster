@@ -38,6 +38,9 @@ pub const Source = struct {
     started_at_ms: i64,
     /// 最後にデータを受信したミリ秒タイムスタンプ（msg_lock で保護）
     last_data_at_ms: i64,
+    /// RTCM3 1005/1006 から抽出した基準局座標。未受信の場合 null
+    /// （msg_lock で保護）
+    station: ?rtcm3.StationCoord,
 
     pub fn create(
         alloc: std.mem.Allocator,
@@ -59,6 +62,7 @@ pub const Source = struct {
             .bytes_in = 0,
             .started_at_ms = now,
             .last_data_at_ms = now,
+            .station = null,
         };
         return s;
     }
@@ -254,6 +258,13 @@ fn sourceLoop(stream: std.net.Stream, src: *Source) void {
 
         for (scan.msg_types[0..scan.count]) |mt| {
             recordMsgType(src, mt);
+        }
+
+        // 1005/1006 が見つかったら基準局座標を更新（同じ source なら通常は固定値）
+        if (scan.station) |sc| {
+            src.msg_lock.lock();
+            src.station = sc;
+            src.msg_lock.unlock();
         }
 
         // 消費済みバイトをシフト（重なり対応のため copyForwards を使用）

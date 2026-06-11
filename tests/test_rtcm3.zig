@@ -226,3 +226,55 @@ test "parseFrame: caller must slice to valid_len to avoid stale-byte misparse" {
     //  の pos が valid_len を超える危険がある。この危険は呼び出し側で
     //  parse_buf[pos..parse_len] にスライスを絞ることで除去する。)
 }
+
+// ── parseStation / scanFrames station extraction (1005/1006) ──────────────────
+
+test "parseStation: roundtrip via msm7.encodeMsg1005" {
+    const msm7 = ntripcaster.fkp.msm7;
+    const alloc = std.testing.allocator;
+    // ECEF for ~Tokyo Tower (lat≈35.66, lon≈139.74, h≈30m)
+    const ecef = msm7.latLonAltToEcef(
+        35.6586 * std.math.pi / 180.0,
+        139.7454 * std.math.pi / 180.0,
+        30.0,
+    );
+    const frame = try msm7.encodeMsg1005(alloc, 100, ecef, false);
+    defer alloc.free(frame);
+
+    const payload_len: usize = (@as(usize, frame[1] & 0x03) << 8) | frame[2];
+    const station = rtcm3.parseStation(frame[3 .. 3 + payload_len]) orelse return error.NoStation;
+
+    try std.testing.expectEqual(@as(u16, 100), station.ref_station_id);
+    try std.testing.expectApproxEqAbs(@as(f64, 35.6586), station.lat_deg, 0.0005);
+    try std.testing.expectApproxEqAbs(@as(f64, 139.7454), station.lon_deg, 0.0005);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), station.antenna_height_m, 0.001);
+}
+
+test "scanFrames: station coord populated when 1005 present" {
+    const msm7 = ntripcaster.fkp.msm7;
+    const alloc = std.testing.allocator;
+    // 札幌の適当な座標
+    const ecef = msm7.latLonAltToEcef(
+        43.0686 * std.math.pi / 180.0,
+        141.3506 * std.math.pi / 180.0,
+        10.0,
+    );
+    const frame = try msm7.encodeMsg1005(alloc, 7, ecef, false);
+    defer alloc.free(frame);
+
+    const scan = rtcm3.scanFrames(frame);
+    try std.testing.expectEqual(@as(usize, 1), scan.count);
+    try std.testing.expectEqual(@as(u16, 1005), scan.msg_types[0]);
+    try std.testing.expect(scan.station != null);
+    try std.testing.expectApproxEqAbs(@as(f64, 43.0686), scan.station.?.lat_deg, 0.0005);
+    try std.testing.expectApproxEqAbs(@as(f64, 141.3506), scan.station.?.lon_deg, 0.0005);
+}
+
+test "scanFrames: station is null when stream has no 1005/1006" {
+    var buf: [64]u8 = undefined;
+    const total = buildFrame(&buf, 1077, 10);
+    const scan = rtcm3.scanFrames(buf[0..total]);
+    try std.testing.expectEqual(@as(usize, 1), scan.count);
+    try std.testing.expectEqual(@as(u16, 1077), scan.msg_types[0]);
+    try std.testing.expect(scan.station == null);
+}
