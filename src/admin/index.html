@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <title>ntripcaster admin</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""></script>
 <style>
   :root {
     --bg: #0e1116;
@@ -74,6 +80,20 @@
   .dot.ok { background: var(--ok); }
   .dot.warn { background: var(--warn); }
   .dot.bad { background: var(--bad); }
+
+  /* Leaflet map */
+  #map {
+    height: 360px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+  }
+  .leaflet-popup-content { font-family: inherit; font-size: 12px; }
+  .leaflet-popup-content b { color: #222; }
+  .map-empty {
+    height: 360px; display: flex; align-items: center; justify-content: center;
+    color: var(--dim); border: 1px dashed var(--border); border-radius: 6px;
+  }
 </style>
 </head>
 <body>
@@ -89,6 +109,14 @@
   </div>
   <span id="conn-state">offline</span>
 </header>
+
+<section>
+  <h2>Map</h2>
+  <div id="map"></div>
+  <div id="map-fallback" class="map-empty" style="display:none">
+    no sources with known coordinates yet (waiting for RTCM Type 1005/1006)
+  </div>
+</section>
 
 <section>
   <h2>Sources</h2>
@@ -170,6 +198,80 @@
                     "offline";
   }
 
+  // ── Leaflet map state ────────────────────────────────────────────────────
+  let map = null;
+  const markers = new Map();   // mount -> L.Marker
+  let mapFitDone = false;
+
+  function ensureMap() {
+    if (map !== null) return map;
+    if (typeof L === "undefined") return null;
+    map = L.map("map", { worldCopyJump: true }).setView([35.681, 139.767], 4);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      maxZoom: 19,
+    }).addTo(map);
+    return map;
+  }
+
+  function updateMap(srcs, now) {
+    const withCoord = srcs.filter(s => s && s.station && Number.isFinite(s.station.lat) && Number.isFinite(s.station.lon));
+    const mapEl = el("map");
+    const fallback = el("map-fallback");
+
+    if (withCoord.length === 0) {
+      if (mapEl) mapEl.style.display = "none";
+      if (fallback) fallback.style.display = "flex";
+      return;
+    }
+    if (mapEl) mapEl.style.display = "block";
+    if (fallback) fallback.style.display = "none";
+
+    const m = ensureMap();
+    if (!m) return;
+    m.invalidateSize();
+
+    const liveMounts = new Set();
+    withCoord.forEach((s) => {
+      liveMounts.add(s.mount);
+      const lat = s.station.lat;
+      const lon = s.station.lon;
+      const sinceData = now - (s.last_data_at_ms || 0);
+      const stale = sinceData > 10000;
+      const popup =
+        `<b>${escape(s.mount)}</b><br>` +
+        `ref_id: ${s.station.ref_id}<br>` +
+        `lat: ${lat.toFixed(5)}<br>` +
+        `lon: ${lon.toFixed(5)}<br>` +
+        `bytes_in: ${fmtBytes(s.bytes_in || 0)}<br>` +
+        `last data: ${fmtDuration(sinceData)} ago${stale ? " (stale)" : ""}`;
+      let mk = markers.get(s.mount);
+      if (mk) {
+        mk.setLatLng([lat, lon]);
+        mk.setPopupContent(popup);
+        mk.setOpacity(stale ? 0.5 : 1.0);
+      } else {
+        mk = L.marker([lat, lon], { opacity: stale ? 0.5 : 1.0 }).addTo(m).bindPopup(popup);
+        markers.set(s.mount, mk);
+      }
+    });
+
+    // Remove markers whose source disappeared
+    for (const [mount, mk] of markers) {
+      if (!liveMounts.has(mount)) {
+        m.removeLayer(mk);
+        markers.delete(mount);
+      }
+    }
+
+    // Auto-fit on first non-empty render
+    if (!mapFitDone && withCoord.length > 0) {
+      mapFitDone = true;
+      const latlngs = withCoord.map(s => [s.station.lat, s.station.lon]);
+      m.fitBounds(latlngs, { padding: [40, 40], maxZoom: 12 });
+    }
+  }
+
   function render(snap) {
     const status = snap.status || {};
     setText("m-version", status.version || "?");
@@ -179,6 +281,7 @@
     setText("m-clients", String(status.clients || 0));
 
     const now = status.now_ms || Date.now();
+    updateMap(snap.sources || [], now);
 
     // Sources
     const srcBody = el("src-body");
