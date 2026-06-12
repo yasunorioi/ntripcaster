@@ -2,15 +2,23 @@
 """ntripcaster 簡易耐久テスト (3 フェーズ)
 
 usage:
+  # open mount (auth 不要) — そのまま
   python3 tools/stress.py
+
+  # 認証付き mount を叩く場合
+  MOUNT_USER=rover1 MOUNT_PW=pw1 python3 tools/stress.py
+
+  # 別ホスト
   HOST=192.0.2.1 PORT=2101 MOUNT=/eniwa-bd982 python3 tools/stress.py
 
 env:
-  HOST       NTRIP host           (default 127.0.0.1)
-  PORT       NTRIP port           (default 2101)
-  MOUNT      mountpoint path      (default /eniwa-bd982)
-  ADMIN      admin base URL       (default http://127.0.0.1:8080)
-  ADMIN_USER admin Basic auth user
+  HOST       NTRIP host                (default 127.0.0.1)
+  PORT       NTRIP port                (default 2101)
+  MOUNT      mountpoint path           (default /eniwa-bd982)
+  MOUNT_USER NTRIP Basic auth user     (空=auth ヘッダ送らない / open mount 用)
+  MOUNT_PW   NTRIP Basic auth password
+  ADMIN      admin base URL            (default http://127.0.0.1:8080)
+  ADMIN_USER admin Basic auth user     (空=auth ヘッダ送らない)
   ADMIN_PW   admin Basic auth password
 
 phases:
@@ -37,9 +45,22 @@ import urllib.request
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "2101"))
 MOUNT = os.environ.get("MOUNT", "/eniwa-bd982")
+MOUNT_USER = os.environ.get("MOUNT_USER", "")
+MOUNT_PW = os.environ.get("MOUNT_PW", "")
 ADMIN = os.environ.get("ADMIN", "http://127.0.0.1:8080")
-USER = os.environ.get("ADMIN_USER", "admin")
-PW = os.environ.get("ADMIN_PW", "")
+ADMIN_USER = os.environ.get("ADMIN_USER", "")
+ADMIN_PW = os.environ.get("ADMIN_PW", "")
+
+
+def _basic_header(user: str, pw: str) -> str:
+    """`Authorization: Basic ...` の値を生成 (user/pw 空なら空文字)。"""
+    if not user:
+        return ""
+    cred = base64.b64encode(f"{user}:{pw}".encode()).decode()
+    return f"Authorization: Basic {cred}\r\n"
+
+
+_MOUNT_AUTH_HDR = _basic_header(MOUNT_USER, MOUNT_PW)
 
 
 async def one_client(idx: int, duration: float, stats: dict) -> None:
@@ -47,7 +68,9 @@ async def one_client(idx: int, duration: float, stats: dict) -> None:
         reader, writer = await asyncio.open_connection(HOST, PORT)
         req = (
             f"GET {MOUNT} HTTP/1.0\r\n"
-            f"User-Agent: ntripcaster-stress/{idx}\r\n\r\n"
+            f"User-Agent: ntripcaster-stress/{idx}\r\n"
+            f"{_MOUNT_AUTH_HDR}"
+            f"\r\n"
         ).encode()
         writer.write(req)
         await writer.drain()
@@ -87,8 +110,8 @@ async def one_client(idx: int, duration: float, stats: dict) -> None:
 def admin_status() -> dict:
     try:
         req = urllib.request.Request(f"{ADMIN}/api/v1/status")
-        if USER:
-            cred = base64.b64encode(f"{USER}:{PW}".encode()).decode()
+        if ADMIN_USER:
+            cred = base64.b64encode(f"{ADMIN_USER}:{ADMIN_PW}".encode()).decode()
             req.add_header("Authorization", f"Basic {cred}")
         with urllib.request.urlopen(req, timeout=3) as r:
             return json.loads(r.read())
