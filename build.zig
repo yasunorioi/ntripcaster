@@ -1,5 +1,9 @@
 // build.zig — NtripCaster Zig rewrite
-// Zig 0.15.x  |  zero external dependencies
+// Zig 0.15.x ONLY  |  zero external dependencies
+//
+// 0.16+ requires migrating Mutex / net to the new std.Io interface
+// (entire codebase needs an *Io runtime threaded through Server / Source
+// / Relay / FKP). Not yet done. Pin to 0.15.x for now.
 //
 // Build commands:
 //   zig build                                        # host target
@@ -9,6 +13,21 @@
 //   zig build test                                   # run all unit tests
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Hard-fail on 0.16+ rather than producing 200 lines of API errors.
+comptime {
+    const v = builtin.zig_version;
+    if (v.major != 0 or v.minor != 15) {
+        @compileError(std.fmt.comptimePrint(
+            "ntripcaster currently requires Zig 0.15.x (found {d}.{d}.{d}). " ++
+                "0.16+ port is blocked on the std.Io interface migration " ++
+                "(std.Thread.Mutex → std.Io.Mutex, std.net → std.Io.net). " ++
+                "Install Zig 0.15.2 from https://ziglang.org/download/0.15.2/",
+            .{ v.major, v.minor, v.patch },
+        ));
+    }
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

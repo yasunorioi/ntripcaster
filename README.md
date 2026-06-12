@@ -159,7 +159,8 @@ class node_tests,node_interop,node_demo toneRose
 
 ## Build
 
-Requires **Zig 0.15.x** (tested with 0.15.2).
+Requires **Zig 0.15.x** (tested with 0.15.2). `build.zig` 先頭で 0.16+ は
+`@compileError` で弾きます。理由は下記「Zig 0.16+ について」を参照。
 
 ```bash
 # ネイティブビルド
@@ -170,6 +171,31 @@ zig build test
 
 # リリースビルド
 zig build -Doptimize=ReleaseSafe
+```
+
+### Zig 0.16+ について
+
+Zig 0.16 で `std.Thread.Mutex` → `std.Io.Mutex`、`std.net` → `std.Io.net`
+など同期/ネットワーク API が新 `std.Io` interface 経由に統一されたため、
+本プロジェクトの ServerState / Source / Relay / FKP runtime に `*std.Io`
+を貫通させる大規模リファクタが必要になります。0.17 でも同じ設計が続く
+ため (release notes 確認済み)、当面は 0.15.x で運用します。
+
+#### snap で 0.16 が入ってしまった場合 (Debian/Ubuntu)
+
+snap zig は beta チャネルのみで 0.15.x が降りてこないので、公式 tarball
+への切り替えを推奨:
+
+```bash
+sudo snap remove zig
+mkdir -p ~/.local/zig ~/.local/bin
+cd ~/.local/zig
+wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+tar xf zig-x86_64-linux-0.15.2.tar.xz
+ln -sf ~/.local/zig/zig-x86_64-linux-0.15.2/zig ~/.local/bin/zig
+# PATH に ~/.local/bin が無ければ:
+echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc && source ~/.bashrc
+zig version    # → 0.15.2
 ```
 
 ### クロスコンパイル
