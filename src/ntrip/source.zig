@@ -41,6 +41,9 @@ pub const Source = struct {
     /// RTCM3 1005/1006 から抽出した基準局座標。未受信の場合 null
     /// （msg_lock で保護）
     station: ?rtcm3.StationCoord,
+    /// このソース由来で client が BufferOverrun (= ring buffer 追従失敗)
+    /// で切断された累積回数
+    overrun_disconnects: std.atomic.Value(u64),
 
     pub fn create(
         alloc: std.mem.Allocator,
@@ -63,6 +66,7 @@ pub const Source = struct {
             .started_at_ms = now,
             .last_data_at_ms = now,
             .station = null,
+            .overrun_disconnects = std.atomic.Value(u64).init(0),
         };
         return s;
     }

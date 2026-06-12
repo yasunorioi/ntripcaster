@@ -190,7 +190,7 @@ pub fn handleClient(
     state.logger.info("client connected: id={d} mount={s} v2={}", .{ id, get.mount, get.is_v2 });
 
     // 6. データ配信ループ
-    clientLoop(stream, src, client, get.is_v2);
+    clientLoop(stream, src, client, get.is_v2, state);
 
     // V2 は終端 chunk "0\r\n\r\n" を送って streamed body を閉じる（best-effort）
     if (get.is_v2) {
@@ -202,7 +202,7 @@ pub fn handleClient(
 
 /// リングバッファからデータを読み取ってクライアントに送信するループ。
 /// ソース切断 / バッファオーバーラン / 送信エラーで終了する。
-fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v2: bool) void {
+fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v2: bool, state: *server.ServerState) void {
     _ = src.client_count.fetchAdd(1, .seq_cst);
     defer _ = src.client_count.fetchSub(1, .seq_cst);
 
@@ -211,7 +211,13 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v
 
     while (src.active.load(.seq_cst)) {
         const result = src.ring.readChunk(read_pos, &buf) catch {
-            // BufferOverrun: クライアントが遅延しすぎ
+            // BufferOverrun: クライアントが ring buffer 追従に失敗。
+            // 「黙って切断」を避けて log + 集計に残す (admin で観測可能に)。
+            const n = src.overrun_disconnects.fetchAdd(1, .seq_cst) + 1;
+            state.logger.warn(
+                "client {d} (mount {s}) disconnected: BufferOverrun (source overruns total={d})",
+                .{ client.id, client.mount, n },
+            );
             break;
         };
 

@@ -15,7 +15,11 @@ const std = @import("std");
 /// `readChunk(read_pos, buf)` で順次データを読み取る。
 pub const RingBuffer = struct {
     pub const CHUNK_SIZE: usize = 4096;
-    pub const NUM_CHUNKS: usize = 64;
+    // NUM_CHUNKS=64 (256 KB) では、source 1 Hz バースト + 同時 100 client
+    // 構成で BufferOverrun → 即切断が頻発した (耐久テスト 248/248
+    // connected→disconnected で検出)。256 chunks (1 MB) に拡大して
+    // 1 秒のバースト + ~100 client 同時シーンを耐えるように。
+    pub const NUM_CHUNKS: usize = 256;
 
     chunks: [NUM_CHUNKS][CHUNK_SIZE]u8 = undefined,
     lengths: [NUM_CHUNKS]usize = [1]usize{0} ** NUM_CHUNKS,
