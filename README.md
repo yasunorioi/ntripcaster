@@ -268,6 +268,52 @@ sudo journalctl -u ntripcaster -f
 | `admin_user` | *(空)* | Basic 認証ユーザー（空なら認証無効） |
 | `admin_password` | *(空)* | Basic 認証パスワード |
 
+### マウントポイント
+
+マウントポイントは config から読まれる静的設定 (ランタイム追加 API は未実装)。
+**source 側 / client 側で扱いが分かれます。**
+
+#### source 側 (基準局 push)
+
+config 編集不要。`encoder_password` さえ合っていれば、基準局が `SOURCE
+{pw} /MOUNT` (v1) または `POST /MOUNT HTTP/1.1` + `Authorization: Basic
+...` (v2) で接続した瞬間に mount が生え、`/api/v1/sources` と sourcetable
+の STR 行に自動で出ます。Type 1005 / 1006 を送れば admin UI の地図にも
+ピンが立ちます。
+
+#### client 側 (rover 受信) のアクセス制御
+
+`/MOUNT` 行を `ntripcaster.conf` に書き足して `systemctl restart` する:
+
+```ini
+# オープンマウント (誰でも GET 可)
+/eniwa-hogehoge333
+
+# 認証付き (rover が NTRIP Basic auth で user:pass を送る)
+/eniwa-hogehoge333:rover1:pw1,rover2:pw2
+```
+
+config の hot-reload は無く、起動時のみ読まれます。
+
+#### 命名規則
+
+`mount` 名はただの opaque な文字列で、NTRIP 規格上の文字数/大文字小文字
+強制はありません。実用上の制約だけ:
+
+- 先頭 `/` 必須 (HTTP path として扱われる)
+- `:` 禁止 (`/MOUNT:user:pass` の区切りと衝突)
+- 空白 / `?` / `#` / `&` 禁止 (URL として安全でない)
+- 大文字小文字は区別される
+
+例: `/eniwa-bd982`, `/eniwa-hogehoge333`, `/BASE01`, `/farm-A_blockN`
+
+#### 接続方法まとめ
+
+| 役割 | NTRIP v1 | NTRIP v2 |
+|---|---|---|
+| Source push | `SOURCE {pw} /MOUNT` | `POST /MOUNT HTTP/1.1` + Basic auth |
+| Client read | `GET /MOUNT HTTP/1.0` | `GET /MOUNT HTTP/1.1` + `Ntrip-Version: Ntrip/2.0` |
+
 ### FKP 設定
 
 Network RTK の FKP (面補正パラメータ) 計算・配信機能。
