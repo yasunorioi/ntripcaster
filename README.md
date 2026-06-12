@@ -419,6 +419,12 @@ nc localhost 2101 < /dev/null  # SOURCETABLE 取得で /FKP_REGION が STR 行�
 NTRIP リスナーとは別ポートで観測用 HTTP サーバーが起動する（既定: `127.0.0.1:8080`）。
 ブラウザで `http://127.0.0.1:8080/` を開くと、SSE で 1 秒ごとに自動更新されるダッシュボードが表示される。
 
+![ntripcaster admin dashboard with OpenStreetMap base-station pin](docs/screenshots/admin-map.png)
+
+ダッシュボードは Status / Sources / Clients テーブルに加えて、接続中
+source が RTCM 3 Type 1005 / 1006 を送ってきた場合に **Leaflet + OSM タイル
+で基準局位置にピン**を立てる。
+
 ### エンドポイント
 
 | メソッド | パス | 用途 |
