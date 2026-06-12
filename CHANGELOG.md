@@ -6,6 +6,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### 削除
+
+- **Legacy C source (`/legacy/`) を repo から削除**: BKG NtripCaster 0.1.5
+  (5.4MB) を working tree から外した。git history (753253f まで) には
+  残っているので、必要なら `git show 753253f:legacy/...` で取り出せる。
+  Zig rewrite が機能パリティ + 拡張機能を持つようになって参照頻度が落ちた
+  ため。
+
 ### 変更
 
 - **Sourcetable CAS/NET 自動生成**: 手書き `conf/sourcetable.dat` を廃止。
@@ -349,7 +357,8 @@ FKP モジュール群を起動時に常時稼働するサービスへ昇格。�
 ## [0.2.0] — 2026-03-28 — Zig rewrite
 
 Complete rewrite of the BKG C implementation in Zig.
-Original C source preserved in `/legacy/` without modification.
+(Original C source kept at this point under `/legacy/`; later removed
+from the working tree — see git history through commit 753253f.)
 
 ### Phase 2 — Zig フルリライト (cmd_463)
 
@@ -402,4 +411,5 @@ Developed by Lesparre, Weber — BKG.
 - autoconf/automake ビルドシステム
 - GNU GPL v2
 
-Original source archived in `/legacy/`.
+Original source was archived under `/legacy/` until commit 753253f;
+fetch from git history if needed.

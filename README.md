@@ -5,7 +5,9 @@ an original FKP / VRS Network RTK engine layered on top (not in BKG 0.1.5).
 
 > **Originally developed by BKG (Bundesamt für Geodäsie und Kartographie)**
 > as part of the NTRIP protocol reference implementation (NtripCaster 0.1.5).
-> Original C source preserved in [`/legacy/`](legacy/).
+> The C source itself is no longer mirrored in this repo — git history
+> through commit `753253f` still contains it under `/legacy/`, and the
+> upstream BKG release remains the canonical source.
 
 ---
 
@@ -45,13 +47,6 @@ subgraph group_ops["Config & deployment"]
   node_log["Logging<br/>observability<br/>[log.zig]"]
 end
 
-subgraph group_legacy["Legacy C reference"]
-  node_legacy_main(("Legacy main<br/>C daemon<br/>[main.c]"))
-  node_legacy_source["Legacy source<br/>C source path<br/>[source.c]"]
-  node_legacy_client["Legacy client<br/>C client path<br/>[client.c]"]
-  node_legacy_log["Legacy log<br/>C logging<br/>[log.c]"]
-end
-
 subgraph group_verification["Verification"]
   node_tests["Tests<br/>test suite<br/>[test_all.zig]"]
   node_interop["Interop<br/>e2e script<br/>[test_interop.sh]"]
@@ -84,9 +79,6 @@ node_main -->|"spawns"| node_admin_server
 node_admin_server -->|"snapshots"| node_server
 node_admin_server -->|"serializes via"| node_admin_stats
 node_admin_server -->|"serves"| node_admin_ui
-node_legacy_main -->|"drives"| node_legacy_source
-node_legacy_main -->|"drives"| node_legacy_client
-node_legacy_main -->|"uses"| node_legacy_log
 node_tests -.->|"covers"| node_config
 node_tests -.->|"covers"| node_auth
 node_tests -.->|"covers"| node_protocol
@@ -117,10 +109,6 @@ click node_fkp_type59 "https://github.com/yasunorioi/ntripcaster/blob/master/src
 click node_fkp_bits "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/bits.zig"
 click node_fkp_upstream "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/upstream.zig"
 click node_fkp_runtime "https://github.com/yasunorioi/ntripcaster/blob/master/src/fkp/runtime.zig"
-click node_legacy_main "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/main.c"
-click node_legacy_source "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/source.c"
-click node_legacy_client "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/client.c"
-click node_legacy_log "https://github.com/yasunorioi/ntripcaster/blob/master/legacy/src/log.c"
 click node_tests "https://github.com/yasunorioi/ntripcaster/blob/master/tests/test_all.zig"
 click node_interop "https://github.com/yasunorioi/ntripcaster/blob/master/tests/test_interop.sh"
 click node_demo "https://github.com/yasunorioi/ntripcaster/blob/master/tools/fkp_demo.zig"
@@ -138,7 +126,6 @@ classDef toneTeal fill:#ccfbf1,stroke:#0f766e,stroke-width:1.5px,color:#134e4a
 class node_main,node_lib,node_server,node_auth,node_source,node_rtcm3,node_relay,node_client,node_protocol,node_sourcetable,node_fkp_engine,node_fkp_msm7,node_fkp_type59,node_fkp_bits,node_fkp_upstream,node_fkp_runtime toneBlue
 class node_admin_server,node_admin_stats,node_admin_ui toneIndigo
 class node_build,node_config,node_log toneAmber
-class node_legacy_main,node_legacy_source,node_legacy_client,node_legacy_log toneMint
 class node_tests,node_interop,node_demo toneRose
 ```
 
@@ -279,8 +266,9 @@ sudo systemctl enable --now ntripcaster
 
 ### (C) レガシー C 版からの移行注意
 
-BKG 原典の C 版 (`legacy/`) を以前 `./configure --prefix=/usr/local/ntripcaster
-&& make install` で入れている場合、新 Zig 版とパスが完全に分かれます:
+BKG 原典の C 版 (NtripCaster 0.1.5) を以前 `./configure
+--prefix=/usr/local/ntripcaster && make install` で入れている場合、新
+Zig 版とパスが完全に分かれます:
 
 - C 版: `/usr/local/ntripcaster/bin/ntripcaster` + `/usr/local/ntripcaster/conf/`
 - Zig 版: `/usr/local/bin/ntripcaster` + `/etc/ntripcaster/`
@@ -538,13 +526,6 @@ Admin HTTP (default 127.0.0.1:8080, separate listener thread):
 
 - 田中慎治 (2003)「ネットワークRTK-GPS測位に関する研究」東京商船大学（現 東京海洋大学）修士論文
   - FKP 計算式: §4.3.3–4.3.4 (pp.51–57)
-
-## Legacy C Implementation
-
-`/legacy/` に BKG 原典 (NtripCaster 0.1.5, C言語) を保存。
-プロトコル仕様・設定書式の照合ベースラインとして利用。
-
-→ [`legacy/README.md`](legacy/README.md)
 
 ## License
 
