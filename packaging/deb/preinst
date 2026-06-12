@@ -1,0 +1,21 @@
+#!/bin/sh
+# preinst — runs before unpacking the new package.
+#
+# Older 0.5.0 packages registered /etc/ntripcaster/ntripcaster.conf as a
+# dpkg conffile, so upgrading to a build that no longer ships it would
+# otherwise leave dpkg with a stale conffile registration and trigger
+# spurious "obsolete conffile" prompts. dpkg-maintscript-helper rm_conffile
+# tells dpkg "this conffile was intentionally removed in version 0.5.1~"
+# and quietly de-registers it while leaving the file in place on disk.
+set -e
+
+case "$1" in
+  install|upgrade)
+    if command -v dpkg-maintscript-helper >/dev/null 2>&1; then
+      dpkg-maintscript-helper rm_conffile \
+        /etc/ntripcaster/ntripcaster.conf 0.5.1~ -- "$@"
+    fi
+    ;;
+esac
+
+exit 0

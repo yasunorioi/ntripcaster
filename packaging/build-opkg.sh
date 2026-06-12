@@ -25,17 +25,32 @@ WORK="${REPO_ROOT}/.ipk-tmp/${PKG}"
 rm -rf "$WORK"
 mkdir -p \
   "${WORK}/data/usr/bin" \
-  "${WORK}/data/etc/ntripcaster" \
+  "${WORK}/data/usr/share/doc/ntripcaster" \
   "${WORK}/control"
 
 # ── Payload ───────────────────────────────────────────────────────────────────
 install -m 0755 "$BINARY"                     "${WORK}/data/usr/bin/ntripcaster"
-install -m 0640 "$REPO_ROOT/conf/ntripcaster.conf" \
-  "${WORK}/data/etc/ntripcaster/ntripcaster.conf"
+# Ship config only as an example; postinst seeds the live file on first
+# install so upgrades never overwrite operator edits.
+install -m 0644 "$REPO_ROOT/conf/ntripcaster.conf" \
+  "${WORK}/data/usr/share/doc/ntripcaster/ntripcaster.conf.example"
 
 # ── Control ───────────────────────────────────────────────────────────────────
 sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${ARCH}/g" \
   "$SCRIPT_DIR/opkg/control.in" > "${WORK}/control/control"
+
+# postinst seeds the live config from the example only when absent.
+cat >"${WORK}/control/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+mkdir -p /etc/ntripcaster
+if [ ! -f /etc/ntripcaster/ntripcaster.conf ]; then
+  cp /usr/share/doc/ntripcaster/ntripcaster.conf.example \
+     /etc/ntripcaster/ntripcaster.conf
+fi
+exit 0
+POSTINST
+chmod +x "${WORK}/control/postinst"
 
 # ── Assemble .ipk (ar archive) ────────────────────────────────────────────────
 OUT="${REPO_ROOT}/${PKG}.ipk"

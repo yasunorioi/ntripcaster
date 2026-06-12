@@ -32,9 +32,9 @@ mkdir -p \
 install -m 0755 "$BINARY" "$WORK/usr/local/bin/ntripcaster"
 install -m 0644 "$REPO_ROOT/ntripcaster.service" \
   "$WORK/lib/systemd/system/ntripcaster.service"
-# Config: both the live location (conffiles) and a doc example
-install -m 0640 "$REPO_ROOT/conf/ntripcaster.conf" \
-  "$WORK/etc/ntripcaster/ntripcaster.conf"
+# Config: ship example only. postinst seeds the live file at
+# /etc/ntripcaster/ntripcaster.conf when absent, so upgrades never
+# overwrite the operator's customised config.
 install -m 0644 "$REPO_ROOT/conf/ntripcaster.conf" \
   "$WORK/usr/share/doc/ntripcaster/ntripcaster.conf.example"
 
@@ -42,9 +42,10 @@ install -m 0644 "$REPO_ROOT/conf/ntripcaster.conf" \
 sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${ARCH}/g" \
   "$SCRIPT_DIR/deb/control.in" > "$WORK/DEBIAN/control"
 
+install -m 0755 "$SCRIPT_DIR/deb/preinst"  "$WORK/DEBIAN/preinst"
 install -m 0755 "$SCRIPT_DIR/deb/postinst" "$WORK/DEBIAN/postinst"
 install -m 0755 "$SCRIPT_DIR/deb/postrm"   "$WORK/DEBIAN/postrm"
-install -m 0644 "$SCRIPT_DIR/deb/conffiles" "$WORK/DEBIAN/conffiles"
+# No DEBIAN/conffiles: config is not a dpkg-managed conffile anymore.
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 dpkg-deb --root-owner-group --build "$WORK" \

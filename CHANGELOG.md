@@ -6,6 +6,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### パッケージング
+
+- **`/etc/ntripcaster/ntripcaster.conf` を deb/rpm/ipk 同梱から外した**:
+  以前は deb の dpkg conffile / rpm の `%config(noreplace)` として live
+  config を直接出荷していたため、deb の upgrade で `dpkg -i` のプロンプト
+  に `Y` を選ぶと operator 編集分が全部 example で上書きされる事故が
+  あった (実例あり)。今後はどのパッケージも `ntripcaster.conf.example`
+  だけ `/usr/share/doc/ntripcaster/` に置き、postinst が live ファイル
+  不在のときだけ example をコピーする方式。upgrade は live config を
+  絶対に触らない。
+  - deb: `dpkg-maintscript-helper rm_conffile` で旧 0.5.0 からの上りでも
+    "obsolete conffile" プロンプトを出さずに de-register
+  - rpm: `%config(noreplace)` 行と `/etc/ntripcaster/` ディレクトリ install
+    を spec から削除、`%post` に seed ロジック
+  - ipk: postinst を control に追加
+
 ### 追加
 
 - **`default_mount_access` 設定**: config に `/MOUNT` 行が無い mount への

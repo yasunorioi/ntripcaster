@@ -20,18 +20,19 @@ Geodesy, Germany). Zig rewrite by Yasunori Oi.
 
 %install
 mkdir -p %{buildroot}/usr/local/bin
-mkdir -p %{buildroot}/usr/local/share/doc/%{name}
+mkdir -p %{buildroot}/usr/share/doc/%{name}
 mkdir -p %{buildroot}/lib/systemd/system
-mkdir -p %{buildroot}/etc/ntripcaster
 
 install -m 0755 %{_sourcedir}/ntripcaster %{buildroot}/usr/local/bin/ntripcaster
 install -m 0644 %{_sourcedir}/ntripcaster.service %{buildroot}/lib/systemd/system/ntripcaster.service
-install -m 0644 %{_sourcedir}/ntripcaster.conf %{buildroot}/etc/ntripcaster/ntripcaster.conf
+# Ship the config only as a documentation example. %post seeds the live
+# file on first install so upgrades never overwrite operator edits.
+install -m 0644 %{_sourcedir}/ntripcaster.conf %{buildroot}/usr/share/doc/%{name}/ntripcaster.conf.example
 
 %files
 /usr/local/bin/ntripcaster
 /lib/systemd/system/ntripcaster.service
-%config(noreplace) /etc/ntripcaster/ntripcaster.conf
+/usr/share/doc/%{name}/ntripcaster.conf.example
 
 %pre
 getent passwd ntripcaster >/dev/null 2>&1 || \
@@ -40,6 +41,14 @@ mkdir -p /var/log/ntripcaster
 chown ntripcaster:ntripcaster /var/log/ntripcaster
 
 %post
+# Seed the live config from the example on first install only.
+mkdir -p /etc/ntripcaster
+if [ ! -f /etc/ntripcaster/ntripcaster.conf ]; then
+  cp /usr/share/doc/%{name}/ntripcaster.conf.example \
+     /etc/ntripcaster/ntripcaster.conf
+fi
+chown -R ntripcaster:ntripcaster /etc/ntripcaster
+
 if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
   systemctl enable ntripcaster.service || true

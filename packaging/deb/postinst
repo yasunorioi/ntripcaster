@@ -3,6 +3,12 @@ set -e
 
 case "$1" in
   configure)
+    # Finish the conffile removal handshake started in preinst.
+    if command -v dpkg-maintscript-helper >/dev/null 2>&1; then
+      dpkg-maintscript-helper rm_conffile \
+        /etc/ntripcaster/ntripcaster.conf 0.5.1~ -- "$@"
+    fi
+
     # Create dedicated unprivileged user if not present
     if ! getent passwd ntripcaster >/dev/null 2>&1; then
       adduser --system --no-create-home --group \
@@ -13,7 +19,9 @@ case "$1" in
     mkdir -p /var/log/ntripcaster
     chown ntripcaster:ntripcaster /var/log/ntripcaster
 
-    # Ensure config directory exists (do not overwrite existing config)
+    # Seed live config from the shipped example only when absent.
+    # Existing operator-edited files are NEVER touched on upgrade because the
+    # config is no longer a dpkg conffile.
     mkdir -p /etc/ntripcaster
     if [ ! -f /etc/ntripcaster/ntripcaster.conf ]; then
       cp /usr/share/doc/ntripcaster/ntripcaster.conf.example \
