@@ -278,3 +278,43 @@ test "scanFrames: station is null when stream has no 1005/1006" {
     try std.testing.expectEqual(@as(u16, 1077), scan.msg_types[0]);
     try std.testing.expect(scan.station == null);
 }
+
+test "parseStation: Quarter Cycle Indicator (DF364, 2 bits) does NOT leak into Z" {
+    // 過去 bug: 1005/1006 の DF364 (Quarter Cycle Indicator) を 1 bit と
+    // 誤って skip していたため、DF364 の 2 bit 目が Z 座標の最高位 (符号 bit)
+    // に流れ込み、北半球の基準局が「南極大陸」として描画されていた。
+    // RTCM 10403.3 §3.5.5 で DF364 は 2 bit。本テストは quarter cycle bits を
+    // 非ゼロにしても X/Y/Z の decode 結果が変わらないことを確認する。
+    const msm7 = ntripcaster.fkp.msm7;
+    const alloc = std.testing.allocator;
+
+    // Eniwa, Hokkaido 付近の基準局 (北緯約 42.9°)
+    const ecef = msm7.latLonAltToEcef(
+        42.8830 * std.math.pi / 180.0,
+        141.5760 * std.math.pi / 180.0,
+        30.0,
+    );
+    const frame = try msm7.encodeMsg1005(alloc, 300, ecef, false);
+    defer alloc.free(frame);
+
+    // payload は frame[3..] から payload_len バイト分
+    const payload_len: usize = (@as(usize, frame[1] & 0x03) << 8) | frame[2];
+    const payload = frame[3 .. 3 + payload_len];
+
+    // ベースライン: quarter cycle = 0b00 (encoder のデフォルト)
+    const baseline = rtcm3.parseStation(payload) orelse return error.NoStation;
+    try std.testing.expect(baseline.lat_deg > 40.0 and baseline.lat_deg < 45.0);
+
+    // payload を mutable copy して quarter cycle bits を 0b11 に立てる。
+    // bit offset: 12 + 12 + 6 + 4 + 38 + 2 + 38 = 112 → byte 14、bit 0..1
+    var mutable: [21]u8 = undefined;
+    @memcpy(mutable[0..payload_len], payload);
+    mutable[14] |= 0xC0; // 上位 2 bit を立てる
+
+    const flipped = rtcm3.parseStation(mutable[0..payload_len]) orelse return error.NoStation;
+
+    // Z 座標 (および lat) は影響を受けないはず
+    try std.testing.expectApproxEqAbs(baseline.lat_deg, flipped.lat_deg, 1e-6);
+    try std.testing.expectApproxEqAbs(baseline.lon_deg, flipped.lon_deg, 1e-6);
+    try std.testing.expectEqual(baseline.ref_station_id, flipped.ref_station_id);
+}

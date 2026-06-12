@@ -199,7 +199,7 @@ pub fn parseStation(payload: []const u8) ?StationCoord {
     const x_raw = br.readS(38);
     br.skip(2); // single receiver osc + reserved
     const y_raw = br.readS(38);
-    br.skip(1); // quarter cycle indicator
+    br.skip(2); // quarter cycle indicator (DF364, 2 bits — RTCM 10403.3 §3.5.5)
     const z_raw = br.readS(38);
 
     var ant_h: f64 = 0.0;

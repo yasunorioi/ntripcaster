@@ -499,7 +499,7 @@ pub fn parseMsg1005(payload: []const u8) ?StationCoord {
     br.skip(1); // single receiver oscillator indicator
     br.skip(1); // reserved
     const y_raw = br.readS(38);
-    br.skip(1); // quarter cycle indicator
+    br.skip(2); // quarter cycle indicator (DF364, 2 bits — RTCM 10403.3 §3.5.5)
     const z_raw = br.readS(38);
 
     const x: f64 = @as(f64, @floatFromInt(x_raw)) * 0.0001;
@@ -572,7 +572,7 @@ pub fn encodeMsg1005(
     bw.writeU(1, 0); // single receiver oscillator
     bw.writeU(1, 0); // reserved
     bw.writeS(38, y_q);
-    bw.writeU(1, 0); // quarter cycle indicator
+    bw.writeU(2, 0); // quarter cycle indicator (DF364, 2 bits — RTCM 10403.3 §3.5.5)
     bw.writeS(38, z_q);
 
     // CRC-24Q
