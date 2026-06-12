@@ -322,6 +322,7 @@ sudo journalctl -u ntripcaster -f
 | `admin_port` | `8080` | 管理リスナーのポート |
 | `admin_user` | *(空)* | Basic 認証ユーザー（空なら認証無効） |
 | `admin_password` | *(空)* | Basic 認証パスワード |
+| `default_mount_access` | `deny` | `/MOUNT` 行が無い mount への client GET 既定挙動 (`deny` / `open`) |
 
 ### マウントポイント
 
@@ -349,6 +350,22 @@ config 編集不要。`encoder_password` さえ合っていれば、基準局が
 ```
 
 config の hot-reload は無く、起動時のみ読まれます。
+
+**`/MOUNT` 行が config に無い mount を source が push したとき**の挙動は
+`default_mount_access` で制御:
+
+| 値 | 動作 |
+|---|---|
+| `deny` (default) | config 未登録 mount への client GET は **401** で蹴る (NTRIP 規格的に明示主義) |
+| `open` | config 未登録 mount でも **誰でも GET 可** (source が push さえすれば自動公開) |
+
+```ini
+# source が連れて来たマウントを自動的にオープン公開したい運用向け
+default_mount_access open
+```
+
+`/MOUNT` や `/MOUNT:user:pass` で明示された mount はこの設定に関わらず
+個別行の設定が優先されます。
 
 #### 命名規則
 

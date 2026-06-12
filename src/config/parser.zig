@@ -29,6 +29,14 @@ pub const MountAuth = struct {
     users: []User,
 };
 
+/// マウント未登録時の client アクセス既定挙動
+/// - .deny: config に `/MOUNT` 行が無い mount への GET は 401 で蹴る (BKG 既定動作)
+/// - .open: config に `/MOUNT` 行が無い mount でも GET 許可 (source が push してれば誰でも読める)
+///
+/// `/MOUNT` や `/MOUNT:user:pass` で明示された mount はこの設定に関わらず
+/// 該当行の設定に従う。
+pub const MountAccess = enum { deny, open };
+
 /// FKP ソース局設定
 pub const FkpSource = struct {
     host: []const u8,
@@ -93,6 +101,8 @@ pub const Config = struct {
     // ── マウント認証テーブル ──────────────────────────────────────────────
     /// キー: マウントパス（"/" で始まる）、値: MountAuth
     mounts: std.StringHashMap(MountAuth),
+    /// `mounts` に登録のない mount への client GET 時の既定挙動
+    default_mount_access: MountAccess = .deny,
 
     // ── 管理 (admin) HTTP ────────────────────────────────────────────────
     /// 観測 UI / JSON API を提供する HTTP リスナーを起動するか
@@ -317,6 +327,17 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
             config.rp_email = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "server_url")) {
             config.server_url = try allocator.dupe(u8, value);
+        } else if (std.mem.eql(u8, key, "default_mount_access")) {
+            if (std.mem.eql(u8, value, "open")) {
+                config.default_mount_access = .open;
+            } else if (std.mem.eql(u8, value, "deny")) {
+                config.default_mount_access = .deny;
+            } else {
+                std.log.warn(
+                    "unknown default_mount_access value '{s}' (expected 'open' or 'deny'); keeping default",
+                    .{value},
+                );
+            }
         } else if (std.mem.eql(u8, key, "caster_host")) {
             config.caster_host = try allocator.dupe(u8, value);
         } else if (std.mem.eql(u8, key, "caster_identifier")) {

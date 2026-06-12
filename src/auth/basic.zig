@@ -89,7 +89,10 @@ pub fn authenticateClient(
     user: []const u8,
     pass: []const u8,
 ) bool {
-    const auth = config.mounts.get(mount) orelse return false;
+    const auth = config.mounts.get(mount) orelse {
+        // 未登録 mount は `default_mount_access` で挙動を決める。
+        return config.default_mount_access == .open;
+    };
 
     if (auth.open) return true;
 

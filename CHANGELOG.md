@@ -6,6 +6,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### 追加
+
+- **`default_mount_access` 設定**: config に `/MOUNT` 行が無い mount への
+  client GET の既定挙動を `deny` (規格動作: 401 で蹴る) と `open`
+  (source が push さえすれば誰でも GET 可) から選べるように。default は
+  `deny` で従来動作と互換。`/MOUNT` や `/MOUNT:user:pass` の明示行はこの
+  設定に関わらず該当行が優先される。
+
 ### 削除
 
 - **Legacy C source (`/legacy/`) を repo から削除**: BKG NtripCaster 0.1.5

@@ -163,6 +163,52 @@ test "authenticateClient: open mount allows any credentials" {
     try std.testing.expect(auth.authenticateClient(&cfg, "/PADO0", "anyone", "anything"));
 }
 
+// ── default_mount_access ─────────────────────────────────────────────────────
+
+test "authenticateClient: default_mount_access=deny rejects unconfigured mount (default)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+    try std.testing.expectEqual(parser.MountAccess.deny, cfg.default_mount_access);
+    try std.testing.expect(!auth.authenticateClient(&cfg, "/NEVER-SEEN", "", ""));
+    try std.testing.expect(!auth.authenticateClient(&cfg, "/NEVER-SEEN", "u", "p"));
+}
+
+test "authenticateClient: default_mount_access=open allows unconfigured mount" {
+    const content =
+        \\encoder_password test_encoder_pass
+        \\default_mount_access open
+        \\/BUCU0:user1:password1
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try parser.parse(arena.allocator(), content);
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(parser.MountAccess.open, cfg.default_mount_access);
+    try std.testing.expect(auth.authenticateClient(&cfg, "/PUSHED-BY-SOURCE", "", ""));
+    try std.testing.expect(auth.authenticateClient(&cfg, "/ANY-NAME", "u", "p"));
+    // 既存の認証付き mount は変わらず厳密
+    try std.testing.expect(auth.authenticateClient(&cfg, "/BUCU0", "user1", "password1"));
+    try std.testing.expect(!auth.authenticateClient(&cfg, "/BUCU0", "u", "wrong"));
+}
+
+test "authenticateClient: default_mount_access ignores unknown value, keeps deny" {
+    const content =
+        \\encoder_password test_encoder_pass
+        \\default_mount_access bogus
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try parser.parse(arena.allocator(), content);
+    defer cfg.deinit();
+
+    try std.testing.expectEqual(parser.MountAccess.deny, cfg.default_mount_access);
+    try std.testing.expect(!auth.authenticateClient(&cfg, "/X", "", ""));
+}
+
 // ── authenticateSource ────────────────────────────────────────────────────────
 
 test "authenticateSource: correct encoder password" {
