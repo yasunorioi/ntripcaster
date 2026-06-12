@@ -212,7 +212,11 @@ zig build -Dtarget=x86_64-linux-musl
 
 ## Install
 
-ビルド成果物 (`zig-out/bin/ntripcaster`) をそのまま配布するか、パッケージ生成して導入する:
+3 ルートあります。**(A) パッケージインストール** が本流、(B) は手動セットアップ、(C) は BKG 0.1.5 C 版から移行する場合の注意。
+
+### (A) パッケージインストール (推奨)
+
+ビルド + .deb / .rpm / .ipk 生成して配布:
 
 ```bash
 # Debian/Ubuntu パッケージ (.deb)
@@ -231,6 +235,69 @@ make packages
 成果物は `*.deb` / `*.rpm` / `*.ipk` としてリポジトリルートに出力される。
 `ARCH` を省略すると `dpkg --print-architecture` の結果 (なければ `amd64`) が使われる。
 
+`.deb` の install layout (postinst が `ntripcaster:ntripcaster` システム
+ユーザ作成 + log dir 作成 + service enable まで自動):
+
+| パス | 内容 |
+|---|---|
+| `/usr/local/bin/ntripcaster` | バイナリ |
+| `/etc/ntripcaster/ntripcaster.conf` | 設定 (conffile、上書き不可) |
+| `/usr/share/doc/ntripcaster/ntripcaster.conf.example` | 設定リファレンス |
+| `/lib/systemd/system/ntripcaster.service` | systemd unit |
+| `/var/log/ntripcaster/` | ログディレクトリ |
+
+```bash
+sudo dpkg -i ntripcaster_0.5.0_amd64.deb
+sudo systemctl start ntripcaster   # enable は postinst が済ませる
+```
+
+### (B) ソースビルド + 手動セットアップ
+
+パッケージを作らず直接配置したい場合:
+
+```bash
+# 1. ビルド
+zig build -Doptimize=ReleaseSafe
+sudo install -m 755 zig-out/bin/ntripcaster /usr/local/bin/ntripcaster
+
+# 2. 設定
+sudo mkdir -p /etc/ntripcaster
+sudo cp conf/ntripcaster.conf /etc/ntripcaster/ntripcaster.conf
+sudo $EDITOR /etc/ntripcaster/ntripcaster.conf    # encoder_password 等を変更
+
+# 3. システムユーザ + log dir
+sudo useradd -r -s /usr/sbin/nologin -d /var/empty ntripcaster
+sudo mkdir -p /var/log/ntripcaster
+sudo chown ntripcaster:ntripcaster /var/log/ntripcaster
+sudo chown -R ntripcaster:ntripcaster /etc/ntripcaster
+
+# 4. systemd unit (リポジトリの ntripcaster.service をそのまま使える)
+sudo install -m 644 ntripcaster.service /etc/systemd/system/ntripcaster.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ntripcaster
+```
+
+### (C) レガシー C 版からの移行注意
+
+BKG 原典の C 版 (`legacy/`) を以前 `./configure --prefix=/usr/local/ntripcaster
+&& make install` で入れている場合、新 Zig 版とパスが完全に分かれます:
+
+- C 版: `/usr/local/ntripcaster/bin/ntripcaster` + `/usr/local/ntripcaster/conf/`
+- Zig 版: `/usr/local/bin/ntripcaster` + `/etc/ntripcaster/`
+
+両方残ると systemd unit がどちらを叩いているか混乱するので、Zig 版に切り
+替えるときは:
+
+```bash
+sudo systemctl stop ntripcaster
+sudo systemctl disable ntripcaster
+# Zig 版の unit / バイナリを (A) または (B) で入れた上で
+sudo systemctl daemon-reload
+sudo systemctl enable --now ntripcaster
+# 旧 C 版の install tree は念のため保管 (削除する場合は中身確認後に)
+sudo mv /usr/local/ntripcaster /usr/local/ntripcaster.legacy.bak
+```
+
 ## systemd 運用
 
 ```bash
@@ -247,7 +314,7 @@ sudo journalctl -u ntripcaster -f
 
 ## 設定ファイル
 
-デフォルト: `/etc/ntripcaster/conf/ntripcaster.conf`
+デフォルト: `/etc/ntripcaster/ntripcaster.conf`
 
 主要設定項目:
 

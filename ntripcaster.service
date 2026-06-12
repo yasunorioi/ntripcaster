@@ -14,8 +14,8 @@ Group=ntripcaster
 # Optional environment file for overrides
 EnvironmentFile=-/etc/ntripcaster/ntripcaster.env
 
-# Zig binary; -c points to config file
-ExecStart=/usr/local/ntripcaster/bin/ntripcaster -c /usr/local/ntripcaster/conf/ntripcaster.conf
+# Zig binary; -c points to config file (paths match the .deb / .rpm layout)
+ExecStart=/usr/local/bin/ntripcaster -c /etc/ntripcaster/ntripcaster.conf
 
 # Restart on any non-clean exit; give systemd 5 s before retry
 Restart=on-failure
@@ -25,9 +25,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ntripcaster
 
-# Harden: restrict writable paths
-ReadWritePaths=/usr/local/ntripcaster/logs
-ReadOnlyPaths=/usr/local/ntripcaster/conf
+# Harden: restrict writable paths (packaging/deb/postinst creates these)
+ReadWritePaths=/var/log/ntripcaster
+ReadOnlyPaths=/etc/ntripcaster
 
 NoNewPrivileges=true
 PrivateTmp=true
