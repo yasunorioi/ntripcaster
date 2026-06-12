@@ -5,7 +5,9 @@
 //! 設計変更点（C版からの改善）:
 //!   - CHUNK_SIZE: 1000 → 4096 (RTCM3最大フレーム長に合わせる)
 //!   - clients_left カウンタ廃止: クライアントが自身の read_pos を管理
-//!   - スレッドセーフ: Mutex で writeChunk/readChunk を保護
+//!   - スレッドセーフ: RwLock で writeChunk (排他) / readChunk (共有) を保護
+//!     reader 同士は並列入場 OK、writer 時のみ単独 → 100+ 同時 client で
+//!     reader 間競合が解消される
 
 const std = @import("std");
 
@@ -24,15 +26,18 @@ pub const RingBuffer = struct {
     chunks: [NUM_CHUNKS][CHUNK_SIZE]u8 = undefined,
     lengths: [NUM_CHUNKS]usize = [1]usize{0} ** NUM_CHUNKS,
     write_pos: usize = 0,
-    mutex: std.Thread.Mutex = .{},
+    /// reader / writer 分離: writer (writeChunk) は exclusive、reader
+    /// (readChunk / currentWritePos) は shared。複数 client が同時に
+    /// readChunk しても reader 同士は競合しない。
+    lock: std.Thread.RwLock = .{},
 
     /// ソースからのデータをリングバッファに格納する。
     ///
     /// `data` が CHUNK_SIZE を超える場合は先頭 CHUNK_SIZE バイトのみ格納する。
     /// 古いデータを無条件に上書きする（遅延クライアントはオーバーランエラーを受け取る）。
     pub fn writeChunk(self: *RingBuffer, data: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock.lock();
+        defer self.lock.unlock();
 
         const pos = self.write_pos % NUM_CHUNKS;
         const len = @min(data.len, CHUNK_SIZE);
@@ -60,8 +65,8 @@ pub const RingBuffer = struct {
     ///   - ReadResult        … コピー成功。next_pos を次回の read_pos として使う
     ///   - error.BufferOverrun … 遅延しすぎてデータが上書きされている
     pub fn readChunk(self: *RingBuffer, read_pos: usize, buf: []u8) ReadError!?ReadResult {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock.lockShared();
+        defer self.lock.unlockShared();
 
         const write_pos = self.write_pos;
 
@@ -84,8 +89,8 @@ pub const RingBuffer = struct {
 
     /// クライアントが接続した時点の write_pos を返す（初期 read_pos として使う）。
     pub fn currentWritePos(self: *RingBuffer) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.lock.lockShared();
+        defer self.lock.unlockShared();
         return self.write_pos;
     }
 };
