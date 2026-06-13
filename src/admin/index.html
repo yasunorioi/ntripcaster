@@ -94,6 +94,20 @@
     height: 360px; display: flex; align-items: center; justify-content: center;
     color: var(--dim); border: 1px dashed var(--border); border-radius: 6px;
   }
+
+  /* Source-offline banner: prominently flag when no source is pushing */
+  .alert {
+    margin-bottom: 16px; padding: 10px 14px;
+    border-radius: 6px;
+    background: #2b1414; border: 1px solid var(--bad);
+    color: var(--fg);
+    display: none;  /* shown via .alert.show */
+  }
+  .alert.show { display: block; }
+  .alert b { color: var(--bad); }
+  /* Make the sources pill itself shout when count is 0. */
+  .pill.alert-pill { background: #2b1414; border-color: var(--bad); }
+  .pill.alert-pill b { color: var(--bad); }
 </style>
 </head>
 <body>
@@ -109,6 +123,12 @@
   </div>
   <span id="conn-state">offline</span>
 </header>
+
+<div id="source-alert" class="alert">
+  <b>⚠ Source offline.</b>
+  どの基準局も接続していません — クライアントの GET は 404 で蹴られます。
+  source 側 (基準局) の電源 / ネット / encoder_password を確認してください。
+</div>
 
 <section>
   <h2>Map</h2>
@@ -279,6 +299,16 @@
     setText("m-uptime", fmtDuration(status.uptime_ms || 0));
     setText("m-sources", String(status.sources || 0));
     setText("m-clients", String(status.clients || 0));
+
+    // Source-offline indicator: pill turns red + top banner.
+    const sourcesOffline = (status.sources || 0) === 0;
+    const sourcesPill = el("m-sources").parentElement;
+    if (sourcesPill) {
+      sourcesPill.classList.toggle("ok", !sourcesOffline);
+      sourcesPill.classList.toggle("alert-pill", sourcesOffline);
+    }
+    const alertEl = el("source-alert");
+    if (alertEl) alertEl.classList.toggle("show", sourcesOffline);
 
     const now = status.now_ms || Date.now();
     updateMap(snap.sources || [], now);
