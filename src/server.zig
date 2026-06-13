@@ -176,6 +176,46 @@ pub const ServerState = struct {
         _ = self.sources.remove(mount);
     }
 
+    /// `mount` のエントリが `src` と一致するときだけ map から外す。
+    /// handleSource の defer から呼ぶ用途。caster 側回線瞬断 →
+    /// 新 SOURCE が evict 経由で既に同 mount を登録した場合、旧スレッドの
+    /// defer が新エントリを誤って削除しないようにする保護。
+    pub fn unregisterSourceIfSame(self: *ServerState, mount: []const u8, src: *Source) void {
+        self.source_lock.lock();
+        defer self.source_lock.unlock();
+        if (self.sources.get(mount)) |current| {
+            if (current == src) _ = self.sources.remove(mount);
+        }
+    }
+
+    /// `mount` に旧 source が居て last_data_at_ms > `max_idle_ms` 前なら、
+    /// fd を shutdown して即 unregister する。新 SOURCE が同 mount を
+    /// 取れるようにするためのもの。caller (handleSource) は registerSource
+    /// 前に呼ぶ。
+    /// 戻り値: true=evict した、false=evict しなかった (新しい / 存在しない)
+    pub fn evictStaleSource(self: *ServerState, mount: []const u8, max_idle_ms: i64) bool {
+        self.source_lock.lock();
+        defer self.source_lock.unlock();
+
+        const old = self.sources.get(mount) orelse return false;
+
+        old.msg_lock.lock();
+        const last_data = old.last_data_at_ms;
+        old.msg_lock.unlock();
+        const now = std.time.milliTimestamp();
+        if (now - last_data <= max_idle_ms) return false;
+
+        // 旧 source を kill: 協調シャットダウン (active=false) +
+        // socket 強制 shutdown (read() が即エラーで戻る)
+        old.active.store(false, .seq_cst);
+        const fd = old.stream_handle.load(.seq_cst);
+        if (fd >= 0) std.posix.shutdown(fd, .both) catch {};
+        _ = self.sources.remove(mount);
+        // 旧 source struct は handleSource の defer が destroy する。
+        // ここでは触らない。
+        return true;
+    }
+
     pub fn getSource(self: *ServerState, mount: []const u8) ?*Source {
         self.source_lock.lock();
         defer self.source_lock.unlock();

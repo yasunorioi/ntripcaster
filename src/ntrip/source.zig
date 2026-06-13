@@ -10,7 +10,13 @@ const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
 const rtcm3 = @import("rtcm3.zig");
+const sockopt = @import("../net/sockopt.zig");
 const sourcetable = @import("sourcetable.zig");
+
+/// 既存 mount との衝突時、何ミリ秒以上 idle なら旧 source を強制 evict するか。
+/// 30 秒は RTCM 基準局の典型送出間隔 (1Hz) より十分大きく、かつ caster 側
+/// 回線瞬断からの reconnect を待つには短い、を狙った値。
+pub const STALE_SOURCE_IDLE_MS: i64 = 30_000;
 
 /// マウントポイントに接続中のソース（基準局）。
 pub const Source = struct {
@@ -44,6 +50,10 @@ pub const Source = struct {
     /// このソース由来で client が BufferOverrun (= ring buffer 追従失敗)
     /// で切断された累積回数
     overrun_disconnects: std.atomic.Value(u64),
+    /// このソースの TCP ストリームの fd。新規 SOURCE がこの mount に
+    /// 来たとき、既存接続を外から shutdown して reconnect を即時通すために
+    /// 持っておく。null の場合は handleSource がまだ設定していない瞬間。
+    stream_handle: std.atomic.Value(std.posix.fd_t),
 
     pub fn create(
         alloc: std.mem.Allocator,
@@ -67,6 +77,7 @@ pub const Source = struct {
             .last_data_at_ms = now,
             .station = null,
             .overrun_disconnects = std.atomic.Value(u64).init(0),
+            .stream_handle = std.atomic.Value(std.posix.fd_t).init(-1),
         };
         return s;
     }
@@ -157,6 +168,15 @@ pub fn handleSource(
     };
 
     // 5. マウント登録
+    //   先に旧 source の stale 判定 + 強制 evict。caster 側回線瞬断後の
+    //   reconnect で「half-open の旧接続が mount 枠を握ったまま」となるのを
+    //   防ぐ。新 SOURCE は即座にこの mount を取り返せる。
+    if (state.evictStaleSource(login.mount, STALE_SOURCE_IDLE_MS)) {
+        state.logger.warn(
+            "source {s}: evicted stale connection (idle > {d}ms), accepting new",
+            .{ login.mount, STALE_SOURCE_IDLE_MS },
+        );
+    }
     state.registerSource(src) catch {
         src.destroy();
         writeSourceError(stream, login.is_v2, "ERROR - Mount already in use\r\n", "409 Conflict");
@@ -164,8 +184,14 @@ pub fn handleSource(
         return;
     };
 
+    // evict 経路から外から shutdown するため、struct に fd を published。
+    src.stream_handle.store(stream.handle, .seq_cst);
+
     defer {
-        state.unregisterSource(login.mount);
+        // 新 SOURCE が evict 経由で同じ mount を既に握ってる場合、ここで
+        // 新エントリを誤って消さないよう "自分が登録した src と一致するときだけ
+        // 外す"。
+        state.unregisterSourceIfSame(login.mount, src);
         // 全クライアントが clientLoop を抜けるまで待機（最大 2 秒）
         var waited: u32 = 0;
         while (src.client_count.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
@@ -173,6 +199,10 @@ pub fn handleSource(
         }
         src.destroy();
     }
+
+    // half-open 検出: 75 秒 (60+5*3) で kernel が死亡判定 → 次の read で
+    // エラーを返してこのスレッドが defer 経由で cleanup できる。
+    sockopt.configureStreamingSocket(stream);
 
     // 6. 成功応答
     if (login.is_v2) {

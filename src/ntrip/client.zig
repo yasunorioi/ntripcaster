@@ -12,50 +12,12 @@
 //! Client 構造体は接続中クライアントを ServerState から追跡するためのレコード。
 
 const std = @import("std");
-const builtin = @import("builtin");
 const server = @import("../server.zig");
 const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
 const relay = @import("../relay/engine.zig");
+const sockopt = @import("../net/sockopt.zig");
 const sourcetable = @import("sourcetable.zig");
-
-/// LTE / Starlink 経由の rover を想定した socket 設定:
-///   - SO_SNDTIMEO=10s: 書き込みが詰まった client (TCP send buffer 詰まり、
-///     たとえば LTE 弱電界で ACK が来ない) を 10 秒で discard する。これが
-///     無いと writeAll が永久ブロックしてその client のスレッドが寝たまま、
-///     さらに ring buffer reader 並列度を 1 減らしてしまう。
-///   - SO_KEEPALIVE + TCP_KEEPIDLE=60 + TCP_KEEPINTVL=5 + TCP_KEEPCNT=3:
-///     LTE エリア跨ぎや Starlink 切替で TCP の FIN が来ずに half-open に
-///     なった client を、約 75 秒で kernel が死亡判定する。これが無いと
-///     ゾンビ connection が `max_clients` 枠を食い続ける。
-fn configureClientSocket(stream: std.net.Stream) void {
-    const tv = std.posix.timeval{ .sec = 10, .usec = 0 };
-    std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.SNDTIMEO,
-        std.mem.asBytes(&tv),
-    ) catch {};
-
-    const enable: c_int = 1;
-    std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.KEEPALIVE,
-        std.mem.asBytes(&enable),
-    ) catch {};
-
-    // TCP_KEEPIDLE/INTVL/CNT は Linux 固有 (BSD/macOS でも近い名前だが
-    // 数値が違う)。ぼかしておかないと他 OS でビルドが転ぶ可能性あり。
-    if (builtin.os.tag == .linux) {
-        const idle: c_int = 60;
-        const intvl: c_int = 5;
-        const cnt: c_int = 3;
-        std.posix.setsockopt(stream.handle, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPIDLE, std.mem.asBytes(&idle)) catch {};
-        std.posix.setsockopt(stream.handle, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPINTVL, std.mem.asBytes(&intvl)) catch {};
-        std.posix.setsockopt(stream.handle, std.posix.IPPROTO.TCP, std.posix.TCP.KEEPCNT, std.mem.asBytes(&cnt)) catch {};
-    }
-}
 
 /// 接続中の NTRIP クライアント (rover) を表す。
 pub const Client = struct {
@@ -230,7 +192,7 @@ pub fn handleClient(
 
     // 6. データ配信ループ
     // LTE/Starlink rover 向けの socket 設定 (詰まり打ち切り + half-open 検出)
-    configureClientSocket(stream);
+    sockopt.configureStreamingSocket(stream);
     clientLoop(stream, src, client, get.is_v2, state);
 
     // V2 は終端 chunk "0\r\n\r\n" を送って streamed body を閉じる（best-effort）

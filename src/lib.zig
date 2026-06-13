@@ -7,6 +7,10 @@ pub const log = @import("log.zig");
 pub const relay = @import("relay/engine.zig");
 pub const server = @import("server.zig");
 
+pub const net = struct {
+    pub const sockopt = @import("net/sockopt.zig");
+};
+
 pub const ntrip = struct {
     pub const protocol = @import("ntrip/protocol.zig");
     pub const sourcetable = @import("ntrip/sourcetable.zig");
@@ -42,6 +46,7 @@ comptime {
     _ = log;
     _ = relay;
     _ = server;
+    _ = net.sockopt;
     _ = ntrip.protocol;
     _ = ntrip.sourcetable;
     _ = ntrip.rtcm3;
