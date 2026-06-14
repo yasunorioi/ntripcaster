@@ -89,14 +89,23 @@ async def one_client(idx: int, duration: float, stats: dict) -> None:
             await writer.wait_closed()
             return
         stats["connected"] += 1
-        # hold the connection by reading bytes until duration elapses
-        try:
-            data = await asyncio.wait_for(
-                reader.read(1024 * 1024), timeout=duration
-            )
-            stats["bytes"] += len(data)
-        except asyncio.TimeoutError:
-            pass
+        # 接続を duration 秒間ちゃんとホールド + データを継続的に drain する。
+        # 過去版は `reader.read(1MB)` を一発呼んでて、asyncio の挙動として
+        # buffer に "ICY 200 OK\r\n\r\n" の末尾 2 byte が残ってると即 return →
+        # 直後 writer.close() で接続を即切ってしまい、caster 側 writeAll が
+        # BrokenPipe で死ぬ「自分で自分を切ってる」状態だった。
+        # 4 KB ずつチャンク読みで continuous drain することで本物の rover を模す。
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            try:
+                chunk = await asyncio.wait_for(reader.read(4096), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                # EOF: caster がこちらを切った
+                break
+            stats["bytes"] += len(chunk)
         writer.close()
         await writer.wait_closed()
         stats["closed_ok"] += 1
