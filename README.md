@@ -1,5 +1,7 @@
 # ntripcaster
 
+📖 **English README**: [README.en.md](README.en.md)
+
 NTRIP v1 / v2 caster — Zig rewrite of the BKG reference implementation, with
 an original FKP / VRS Network RTK engine layered on top (not in BKG 0.1.5).
 
