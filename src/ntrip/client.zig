@@ -212,6 +212,16 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v
     var read_pos = src.ring.currentWritePos();
     var buf: [relay.RingBuffer.CHUNK_SIZE]u8 = undefined;
 
+    // src.active が最初から false の場合の検出用 (clientLoop が一度も
+    // 走らずに帰ってる病理症状を切り分ける)。
+    if (!src.active.load(.seq_cst)) {
+        state.logger.warn(
+            "client {d} (mount {s}) disconnected: src.active was false on entry",
+            .{ client.id, client.mount },
+        );
+        return;
+    }
+
     while (src.active.load(.seq_cst)) {
         const result = src.ring.readChunk(read_pos, &buf) catch {
             // BufferOverrun: クライアントが ring buffer 追従に失敗。
@@ -226,9 +236,21 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v
 
         if (result) |r| {
             if (is_v2) {
-                writeChunked(stream, buf[0..r.len]) catch break;
+                writeChunked(stream, buf[0..r.len]) catch |err| {
+                    state.logger.warn(
+                        "client {d} (mount {s}) disconnected: writeChunked failed: {}",
+                        .{ client.id, client.mount, err },
+                    );
+                    break;
+                };
             } else {
-                stream.writeAll(buf[0..r.len]) catch break;
+                stream.writeAll(buf[0..r.len]) catch |err| {
+                    state.logger.warn(
+                        "client {d} (mount {s}) disconnected: writeAll failed: {}",
+                        .{ client.id, client.mount, err },
+                    );
+                    break;
+                };
             }
             client.stat_lock.lock();
             client.bytes_out += r.len;
@@ -238,5 +260,14 @@ fn clientLoop(stream: std.net.Stream, src: *server.Source, client: *Client, is_v
             // データ待ち: CPU を占有しないよう短時間スリープ
             std.Thread.sleep(10 * std.time.ns_per_ms);
         }
+    }
+
+    // 通常終了 (src.active=false で while を抜けた) ケースも識別できるよう
+    // 終了理由を info で残す。
+    if (!src.active.load(.seq_cst)) {
+        state.logger.info(
+            "client {d} (mount {s}) loop exit: src.active=false (source closing)",
+            .{ client.id, client.mount },
+        );
     }
 }
