@@ -131,15 +131,16 @@ class node_tests,node_interop,node_demo toneRose
 
 ## Features
 
-- NTRIP v1 server / source / client relay
-- HTTP Basic authentication (sourcetable, per-mountpoint)
-- Ring-buffer per source stream (zero-copy relay to multiple clients)
+- NTRIP v1 / v2 server / source / client relay
+- HTTP Basic authentication (per-mountpoint, plus `default_mount_access deny|open`)
+- Ring-buffer per source stream (1 MB, RwLock 分離 — 100+ rover 同時 read を並列化、`tools/stress.py` で 100 client × 5 min soak 実証済)
 - Connection limit enforcement (max_clients / max_clients_per_source / max_sources)
 - Sourcetable fully auto-generated: CAS / NET 行は設定ファイルから組み立て、STR 行は live source から動的生成（手書き `sourcetable.dat` 不要）
-- RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection)
+- RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection, 1005/1006 antenna-ref-point lat/lon 抽出)
+- **Harsh-conditions hardening** (農機 / LTE / Starlink 想定): client + source 両側に `SO_KEEPALIVE` + `SO_SNDTIMEO` を適用、source の half-open 接続は約 75 秒で kernel 検出。同名 mount への新 SOURCE 接続が来たとき旧接続が 30 秒 idle なら即 evict して reconnect を 0 秒で通す
 - **FKP (Flächenkorrekturparameter) live service** — 3+ NTRIP 上流に接続し、主上流の生 RTCM3 + 定期注入 Type 59 を仮想 mountpoint として配信 (Network RTK)
-- **Admin UI + JSON API** (`/api/v1/{status,sources,clients,events}`) with SSE live updates and embedded vanilla-JS dashboard
-- Per-connection telemetry: peer address, bytes_in/out, started_at, last_data_at, per-source RTCM3 message-type counts
+- **Admin UI + JSON API** (`/api/v1/{status,sources,clients,events}`) with SSE live updates and embedded vanilla-JS dashboard + Leaflet/OSM 基準局マップ + source-offline 赤バナー
+- Per-connection telemetry: peer address, bytes_in/out, started_at, last_data_at, per-source RTCM3 message-type counts, BufferOverrun 切断回数
 - Cross-compile ready: `x86_64-linux-musl`, `aarch64-linux-musl`, `arm-linux-musleabihf`, `mipsel-linux-musl`
 - systemd service unit with hardening options
 - Single static binary — no runtime dependencies
@@ -544,6 +545,27 @@ Admin HTTP (default 127.0.0.1:8080, separate listener thread):
 ```
 
 詳細: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
+## Stress test
+
+`tools/stress.py` は asyncio で 1 プロセス内に並列接続を貼って 3 フェーズの
+耐久確認をする (`max_clients_per_source` 制限 → connect storm → 5分 soak)。
+
+```bash
+ADMIN_USER=admin ADMIN_PW=… python3 tools/stress.py
+```
+
+実測値 (default config: `max_clients=100`、1 mount = `/eniwa-bd982` から
+Trimble BD982 が MSM7 multi-GNSS を ~470 B/sec で push):
+
+| Phase | 設定 | 結果 |
+|---|---|---|
+| 1. limit enforcement | 110 client × 30s hold | 98 connect / 12 `503 Too Many Clients`、bytes 1.39 MB (≒ 14 KB/client) |
+| 2. connect storm | 200 client × 2s hold | 200 全部 503 ← Phase 1 の 99 がまだ drain 中、graceful 過負荷 ✓ |
+| 3. soak | 50 client × 5 min | 50 connect 維持、bytes 6.99 MB、RSS フラット (3.4 MB)、`err_bad_status=0`、`BufferOverrun=0` |
+
+100 同時 client + 5 分 soak で安定。リーク無し。`max_clients` を 150 程度に
+上げると reconnect 余裕も含めて農機 100 台運用想定が安全圏。
 
 ## References
 

@@ -6,6 +6,54 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Production hardening (100+ concurrent client 向け)
+
+- **RingBuffer Mutex → RwLock**: writer (source.writeChunk) は exclusive、
+  reader (client) は shared lock に変更。100+ rover が同じ source を
+  同時に読む構成で reader 同士の競合が消える。`tools/stress.py` の 100
+  client × 5 分 soak で安定動作を確認 (RSS フラット、`err=0`、bytes per
+  client が実 RTCM レートと一致)。
+- **RingBuffer 拡大** (NUM_CHUNKS 64 → 256 = 1 MB): 1 秒バースト +
+  ~100 reader 構成で `BufferOverrun` 即切断していた問題に余裕を持たせた。
+- **client / source 両方に `SO_SNDTIMEO=10s` + `SO_KEEPALIVE`**
+  (`TCP_KEEPIDLE=60` + `KEEPINTVL=5` + `KEEPCNT=3`): LTE 弱電界 / Starlink
+  切替で発生する TCP 詰まり / half-open を約 75 秒で kernel 検出。
+  `src/net/sockopt.zig` に共通化。
+- **Source の stale 接続 evict**: 同名 mount への新 SOURCE 接続が来たとき、
+  既存 source の `last_data_at_ms` が 30 秒以上前なら旧接続を即 shutdown
+  + unregister して新規受け入れ。caster 側回線瞬断後の reconnect が
+  「Mount already in use」で蹴られる現象を 0 秒で解消。`Source.stream_handle`
+  と `ServerState.evictStaleSource` / `unregisterSourceIfSame` を追加。
+- **client disconnect 理由ログ**: clientLoop の全終了経路 (writeAll /
+  writeChunked エラー、BufferOverrun、src.active=false) をそれぞれ
+  `WARN` / `INFO` で残し、`src.overrun_disconnects` カウンタも追加。
+  「silent disconnect」を撲滅。
+- **`tools/stress.py`**: 3 フェーズ asyncio stress (limit / storm / soak)。
+  ハマり防止のため drain ループで本物の rover を模倣 (旧版は
+  `read(1MB)` 一発で即 return → caster が BrokenPipe で死ぬ「自己干渉」
+  だった)。
+
+### Admin UI
+
+- **基準局マップ + ピン** (Leaflet + OSM タイル): 1005/1006 から抽出した
+  lat/lon にピンを立て、stale (last_data > 10s) は半透明化。`docs/screenshots/admin-map.png`
+  も同梱。
+- **Source-offline インジケータ**: source 数が 0 のときヘッダの `sources`
+  pill が赤くなり、上部に "⚠ Source offline" 赤バナーが出る。SSE の
+  "● live" 緑色 (admin 接続状態) と source 健全性の混同を解消。
+- **`station` フィールド**: `/api/v1/sources` JSON に `{ref_id, lat, lon, alt}`
+  を追加 (1005/1006 未受信なら null)。`src/ntrip/rtcm3.zig` に
+  `parseStation` + ECEF→WGS84 を実装。
+
+### 修正
+
+- **RTCM 1005/1006 の Quarter Cycle Indicator (DF364) を 2 bit にする**:
+  以前は 1 bit でスキップしていたため、Z 座標の sign bit にズレが流れ込み、
+  北半球の基準局 (恵庭) が南極大陸 (-68°) に描画されていた。RTCM 10403.3
+  §3.5.5 に準拠。1006 のアンテナ高 16 bit も同時に正しく取れるようになり、
+  既存の round-trip テストでは捕まらない bug だったため "DF364 の 2 bit を
+  立てても X/Y/Z が変化しない" regression テストを追加。
+
 ### パッケージング
 
 - **`/etc/ntripcaster/ntripcaster.conf` を deb/rpm/ipk 同梱から外した**:
