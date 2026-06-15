@@ -1,37 +1,39 @@
 #!/usr/bin/env python3
-"""ntripcaster 簡易耐久テスト (3 フェーズ)
+"""3-phase stress / endurance drill for ntripcaster.
 
 usage:
-  # open mount (auth 不要) — そのまま
+  # open mount (no auth) — just run it
   python3 tools/stress.py
 
-  # 認証付き mount を叩く場合
+  # against an auth-gated mount
   MOUNT_USER=rover1 MOUNT_PW=pw1 python3 tools/stress.py
 
-  # 別ホスト
+  # different host
   HOST=192.0.2.1 PORT=2101 MOUNT=/eniwa-bd982 python3 tools/stress.py
 
 env:
-  HOST       NTRIP host                (default 127.0.0.1)
-  PORT       NTRIP port                (default 2101)
-  MOUNT      mountpoint path           (default /eniwa-bd982)
-  MOUNT_USER NTRIP Basic auth user     (空=auth ヘッダ送らない / open mount 用)
-  MOUNT_PW   NTRIP Basic auth password
-  ADMIN      admin base URL            (default http://127.0.0.1:8080)
-  ADMIN_USER admin Basic auth user     (空=auth ヘッダ送らない)
-  ADMIN_PW   admin Basic auth password
+  HOST        NTRIP host                  (default 127.0.0.1)
+  PORT        NTRIP port                  (default 2101)
+  MOUNT       mountpoint path             (default /eniwa-bd982)
+  MOUNT_USER  NTRIP Basic auth user       (empty = no auth header / open mount)
+  MOUNT_PW    NTRIP Basic auth password
+  ADMIN       admin base URL              (default http://127.0.0.1:8080)
+  ADMIN_USER  admin Basic auth user       (empty = no auth header)
+  ADMIN_PW    admin Basic auth password
 
 phases:
   1. limit enforcement: 110 concurrent clients × 30 s
-     → max_clients_per_source の動作確認 (default 100)
+     → verifies max_clients_per_source (default 100)
   2. connect storm:     200 concurrent clients × 2 s
-     → listener / accept / thread spawn race の検出
+     → exercises the listener / accept / thread-spawn race
   3. soak:               50 concurrent clients × 5 min
-     → RSS が単調増加するかでメモリリーク監視
+     → watches for monotonic RSS growth as a leak signal
 
-asyncio で 1 プロセス内に並列接続を作るので、bash + /dev/tcp + & の
-取りこぼしが無い。各接続の終了状態 (connected / closed_ok / err_*) を
-集計し、HTTP ステータス行の先頭 80 byte をサンプルで残す。
+Why asyncio in a single process: the previous bash + /dev/tcp + & version
+silently lost connections under load. asyncio guarantees every task is
+actually scheduled. Each connection's terminal state (connected /
+closed_ok / err_*) is counted, and the first 80 bytes of any failing
+response or error message is kept as a sample for debugging.
 """
 import asyncio
 import base64
