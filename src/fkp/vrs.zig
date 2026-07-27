@@ -20,6 +20,7 @@
 //!   非ブロッキングで読んで `$G[PNL]GGA,...` 行を切り出してパースする。
 
 const std = @import("std");
+const io = @import("../io.zig");
 const parser = @import("../config/parser.zig");
 const server = @import("../server.zig");
 const source_mod = @import("../ntrip/source.zig");
@@ -56,8 +57,8 @@ pub const VrsConfig = struct {
 /// 単一 VRS rover の状態。1 接続 = 1 VrsRover = 1 スレッド。
 pub const VrsRover = struct {
     id: u64,
-    stream: std.net.Stream,
-    peer_addr: std.net.Address,
+    stream: io.Stream,
+    peer_addr: io.Address,
     started_at_ms: i64,
     alloc: std.mem.Allocator,
 
@@ -107,8 +108,8 @@ pub const VrsRover = struct {
     pub fn create(
         alloc: std.mem.Allocator,
         id: u64,
-        stream: std.net.Stream,
-        peer_addr: std.net.Address,
+        stream: io.Stream,
+        peer_addr: io.Address,
     ) !*VrsRover {
         const r = try alloc.create(VrsRover);
         r.* = .{
@@ -240,8 +241,8 @@ pub const Runtime = struct {
     /// この関数の戻りでハンドラスレッドが終了する。
     pub fn handle(
         self: *Runtime,
-        stream: std.net.Stream,
-        peer_addr: std.net.Address,
+        stream: io.Stream,
+        peer_addr: io.Address,
     ) void {
         if (self.fkp_src == null) {
             stream.writeAll("HTTP/1.0 503 Service Unavailable\r\n\r\n") catch {};
@@ -294,7 +295,7 @@ pub const Runtime = struct {
 
 // ── dispatch (server.VrsHandler 用) ───────────────────────────────────────
 
-fn dispatchHandle(ctx: *anyopaque, stream: std.net.Stream, peer: std.net.Address) void {
+fn dispatchHandle(ctx: *anyopaque, stream: io.Stream, peer: io.Address) void {
     const rt: *Runtime = @ptrCast(@alignCast(ctx));
     rt.handle(stream, peer);
 }
@@ -428,7 +429,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
 
 // ── GGA 読み取り ─────────────────────────────────────────────────────────
 
-fn setRecvTimeoutMs(stream: std.net.Stream, ms: u32) !void {
+fn setRecvTimeoutMs(stream: io.Stream, ms: u32) !void {
     const tv = std.posix.timeval{
         .sec = @intCast(ms / 1000),
         .usec = @intCast((ms % 1000) * 1000),
@@ -830,7 +831,7 @@ fn makeTestRover(alloc: std.mem.Allocator) VrsRover {
     return .{
         .id = id,
         .stream = .{ .handle = -1 }, // 触らない (forwardFiltered は writer 側を使う)
-        .peer_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .peer_addr = io.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
         .started_at_ms = 0,
         .alloc = alloc,
         .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)), // = 0x82A

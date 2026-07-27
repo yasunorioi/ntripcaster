@@ -13,6 +13,7 @@
 //! を受け取る。これでネットワーク RTK サービスとして機能する。
 
 const std = @import("std");
+const io = @import("../io.zig");
 const parser = @import("../config/parser.zig");
 const server = @import("../server.zig");
 const source_mod = @import("../ntrip/source.zig");
@@ -154,7 +155,7 @@ pub const Runtime = struct {
         };
 
         // 仮想 Source を作って登録 (peer_addr はダミー 0.0.0.0:0)
-        const dummy_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+        const dummy_addr = io.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
         const virt = try source_mod.Source.create(alloc, mount_with_slash, dummy_addr);
         errdefer virt.destroy();
         virt.rtcm_detected = true; // 主上流の RTCM3 を流すので最初から true

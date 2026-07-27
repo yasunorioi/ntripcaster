@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const io = @import("../io.zig");
 
 /// 長寿命ストリーミング接続向け socket 設定。client / source 両方に適用する。
 ///
@@ -17,7 +18,7 @@ const builtin = @import("builtin");
 ///
 /// 失敗は無視する (古い kernel で TCP_KEEP* 系を持ってない等で die しない
 /// よう、`catch {}` する)。
-pub fn configureStreamingSocket(stream: std.net.Stream) void {
+pub fn configureStreamingSocket(stream: io.Stream) void {
     const tv = std.posix.timeval{ .sec = 10, .usec = 0 };
     std.posix.setsockopt(
         stream.handle,

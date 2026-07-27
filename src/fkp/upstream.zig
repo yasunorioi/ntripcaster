@@ -10,6 +10,7 @@
 //! 切断時は指数バックオフで再接続する。`stop()` で終了。
 
 const std = @import("std");
+const io = @import("../io.zig");
 const msm7 = @import("msm7.zig");
 const ephemeris = @import("ephemeris.zig");
 const rtcm3 = @import("../ntrip/rtcm3.zig");
@@ -245,7 +246,7 @@ fn sleepInterruptible(self: *Upstream, ms: u64) void {
 }
 
 /// socket に SO_RCVTIMEO を設定する。secs == 0 で無効化。
-fn setRecvTimeout(stream: std.net.Stream, secs: u32) !void {
+fn setRecvTimeout(stream: io.Stream, secs: u32) !void {
     const tv = std.posix.timeval{
         .sec = @intCast(secs),
         .usec = 0,
@@ -260,8 +261,8 @@ fn setRecvTimeout(stream: std.net.Stream, secs: u32) !void {
 }
 
 /// NTRIP caster に GET 接続 → ICY 200 OK 確認まで
-fn connect(self: *Upstream) !std.net.Stream {
-    const stream = try std.net.tcpConnectToHost(self.alloc, self.cfg.host, self.cfg.port);
+fn connect(self: *Upstream) !io.Stream {
+    const stream = try io.tcpConnectToHost(self.alloc, self.cfg.host, self.cfg.port);
     errdefer stream.close();
 
     // ICY 待ち中に上流が応答しないと無限ハングするので、接続フェーズだけ短い
@@ -289,7 +290,7 @@ fn connect(self: *Upstream) !std.net.Stream {
 }
 
 /// 合成 NMEA GGA を送信する (rtk2go の NMEA=1 マウントを「開ける」ための嘘 GGA)。
-fn sendGga(self: *Upstream, stream: std.net.Stream) !void {
+fn sendGga(self: *Upstream, stream: io.Stream) !void {
     var buf: [128]u8 = undefined;
     const sentence = formatGga(&buf, self.cfg.gga_lat_deg, self.cfg.gga_lon_deg) orelse return;
     try stream.writeAll(sentence);
@@ -333,7 +334,7 @@ fn formatGga(buf: []u8, lat_deg: f64, lon_deg: f64) ?[]const u8 {
     return buf[0..fbs.pos];
 }
 
-fn sendGet(self: *Upstream, stream: std.net.Stream) !void {
+fn sendGet(self: *Upstream, stream: io.Stream) !void {
     var req_buf: [768]u8 = undefined;
 
     if (self.cfg.user.len > 0) {
@@ -376,7 +377,7 @@ fn sendGet(self: *Upstream, stream: std.net.Stream) !void {
     }
 }
 
-fn waitIcy(stream: std.net.Stream) !void {
+fn waitIcy(stream: io.Stream) !void {
     var buf: [256]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
@@ -393,7 +394,7 @@ fn waitIcy(stream: std.net.Stream) !void {
 }
 
 /// 受信生バイトを取り込み、パススルー callback と RTCM3 パーサーに投入する。
-fn readLoop(self: *Upstream, stream: std.net.Stream) void {
+fn readLoop(self: *Upstream, stream: io.Stream) void {
     var read_buf: [4096]u8 = undefined;
     // RTCM3 パース用バッファ (チャンク跨ぎ対応)
     var parse_buf: [8192]u8 = undefined;

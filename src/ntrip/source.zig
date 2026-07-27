@@ -5,6 +5,7 @@
 //! 受信データを並行して RTCM3 フレーム解析し、メッセージタイプ統計を Source に蓄積する。
 
 const std = @import("std");
+const io = @import("../io.zig");
 const server = @import("../server.zig");
 const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
@@ -37,7 +38,7 @@ pub const Source = struct {
 
     // ── Telemetry ───────────────────────────────────────────────────────
     /// 接続元アドレス（accept() 時点）
-    peer_addr: std.net.Address,
+    peer_addr: io.Address,
     /// 受信累積バイト数（msg_lock で保護）
     bytes_in: u64,
     /// 接続確立ミリ秒タイムスタンプ
@@ -53,12 +54,12 @@ pub const Source = struct {
     /// このソースの TCP ストリームの fd。新規 SOURCE がこの mount に
     /// 来たとき、既存接続を外から shutdown して reconnect を即時通すために
     /// 持っておく。null の場合は handleSource がまだ設定していない瞬間。
-    stream_handle: std.atomic.Value(std.posix.fd_t),
+    stream_handle: std.atomic.Value(io.Handle),
 
     pub fn create(
         alloc: std.mem.Allocator,
         mount: []const u8,
-        peer_addr: std.net.Address,
+        peer_addr: io.Address,
     ) !*Source {
         const s = try alloc.create(Source);
         const now = std.time.milliTimestamp();
@@ -77,7 +78,7 @@ pub const Source = struct {
             .last_data_at_ms = now,
             .station = null,
             .overrun_disconnects = std.atomic.Value(u64).init(0),
-            .stream_handle = std.atomic.Value(std.posix.fd_t).init(-1),
+            .stream_handle = std.atomic.Value(io.Handle).init(-1),
         };
         return s;
     }
@@ -91,7 +92,7 @@ pub const Source = struct {
 };
 
 /// V1 / V2 共通のエラー応答。V1: 平文 "ERROR - ..." 、V2: HTTP/1.1 ステータスライン。
-fn writeSourceError(stream: std.net.Stream, is_v2: bool, v1_msg: []const u8, v2_status: []const u8) void {
+fn writeSourceError(stream: io.Stream, is_v2: bool, v1_msg: []const u8, v2_status: []const u8) void {
     if (is_v2) {
         var buf: [256]u8 = undefined;
         const resp = std.fmt.bufPrint(&buf,
@@ -119,10 +120,10 @@ fn writeSourceError(stream: std.net.Stream, is_v2: bool, v1_msg: []const u8, v2_
 ///   6. RTCMデータ受信ループ → RingBuffer に writeChunk
 ///   7. 切断時にマウント解放、active=false でクライアントを通知
 pub fn handleSource(
-    stream: std.net.Stream,
+    stream: io.Stream,
     state: *server.ServerState,
     login: protocol.SourceLogin,
-    peer_addr: std.net.Address,
+    peer_addr: io.Address,
 ) void {
     // 1. パスワード検証
     var pw_ok = false;
@@ -251,7 +252,7 @@ fn recordMsgType(src: *Source, msg_type: u16) void {
 
 /// RTCMデータを受信してリングバッファに書き込むループ。
 /// 並行して RTCM3 フレーム解析を行い、メッセージタイプ統計を蓄積する。
-fn sourceLoop(stream: std.net.Stream, src: *Source) void {
+fn sourceLoop(stream: io.Stream, src: *Source) void {
     var buf: [relay.RingBuffer.CHUNK_SIZE]u8 = undefined;
     // RTCM3 フレーム解析用バッファ（チャンク跨ぎ対応：最大 2 チャンク分）
     var parse_buf: [relay.RingBuffer.CHUNK_SIZE * 2]u8 = undefined;

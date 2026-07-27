@@ -7,6 +7,7 @@
 //! 文字列フィールドは JSON 仕様に従いエスケープする。
 
 const std = @import("std");
+const io = @import("../io.zig");
 const server = @import("../server.zig");
 
 /// ── JSON ヘルパー ────────────────────────────────────────────────────────────
@@ -40,11 +41,11 @@ pub fn appendQuoted(
     try out.append(alloc, '"');
 }
 
-/// std.net.Address を "ip:port" 形式で出力する（JSON 文字列として）。
+/// io.Address を "ip:port" 形式で出力する（JSON 文字列として）。
 pub fn appendAddr(
     out: *std.ArrayList(u8),
     alloc: std.mem.Allocator,
-    addr: std.net.Address,
+    addr: io.Address,
 ) !void {
     var tmp: [128]u8 = undefined;
     const formatted = std.fmt.bufPrint(&tmp, "{f}", .{addr}) catch

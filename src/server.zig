@@ -4,6 +4,7 @@
 //! 1接続1スレッドモデル（Phase 2）。Phase 3以降でio_uring非同期化予定。
 
 const std = @import("std");
+const io = @import("io.zig");
 const parser = @import("config/parser.zig");
 const auth = @import("auth/basic.zig");
 const protocol = @import("ntrip/protocol.zig");
@@ -27,7 +28,7 @@ pub const Client = client_mod.Client;
 // する。
 pub const VrsHandler = struct {
     ctx: *anyopaque,
-    handle_fn: *const fn (ctx: *anyopaque, stream: std.net.Stream, peer: std.net.Address) void,
+    handle_fn: *const fn (ctx: *anyopaque, stream: io.Stream, peer: io.Address) void,
     matches_fn: *const fn (ctx: *anyopaque, mount: []const u8) bool,
 };
 
@@ -36,7 +37,7 @@ pub const VrsHandler = struct {
 /// 観測専用の Source スナップショット。Mutex 越しに owned コピーを返すための型。
 pub const SourceSnapshot = struct {
     mount: []const u8,
-    peer_addr: std.net.Address,
+    peer_addr: io.Address,
     rtcm_detected: bool,
     client_count: u32,
     bytes_in: u64,
@@ -65,7 +66,7 @@ pub const SourceSnapshot = struct {
 pub const ClientSnapshot = struct {
     id: u64,
     mount: []const u8,
-    peer_addr: std.net.Address,
+    peer_addr: io.Address,
     bytes_out: u64,
     started_at_ms: i64,
 
@@ -88,12 +89,14 @@ pub const ServerState = struct {
     logger: log_mod.Logger,
     /// sourcetable.dat を探すディレクトリ
     conf_dir: []const u8,
-    /// ヒープ上の TCP リスナー（shutdown() で deinit + free する）
+    /// ヒープ上の TCP リスナー（shutdown() で deinit + free する）。
+    /// listener 自体は backend 固有 (posix: std.net.Server)。lwip 移植時は
+    /// ここを io_lwip の listener に差し替える。
     listener: ?*std.net.Server,
     /// サーバーが listen() に入ったことを通知するイベント
     started_event: std.Thread.ResetEvent,
     /// 実際にバインドされたアドレス（started_event.wait() 後に読める）
-    listen_address: std.net.Address,
+    listen_address: io.Address,
     /// 接続中ハンドラースレッド数（deinit() 内でゼロを待機する）
     active_handlers: std.atomic.Value(u32),
     /// VRS dispatch (main.zig が VrsRuntime 作成後に差し込む)
@@ -340,12 +343,12 @@ pub const ServerState = struct {
 // ── 接続ディスパッチ ──────────────────────────────────────────────────────────
 
 const ConnArgs = struct {
-    stream: std.net.Stream,
+    stream: io.Stream,
     state: *ServerState,
-    peer_addr: std.net.Address,
+    peer_addr: io.Address,
 };
 
-fn readHeader(stream: std.net.Stream, buf: []u8) !usize {
+fn readHeader(stream: io.Stream, buf: []u8) !usize {
     var total: usize = 0;
     while (total < buf.len) {
         const n = try stream.read(buf[total..]);
@@ -357,11 +360,11 @@ fn readHeader(stream: std.net.Stream, buf: []u8) !usize {
     return total;
 }
 
-fn sendBadRequest(stream: std.net.Stream) void {
+fn sendBadRequest(stream: io.Stream) void {
     stream.writeAll("HTTP/1.0 400 Bad Request\r\n\r\n") catch {};
 }
 
-fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState, is_v2: bool, keep_alive: bool) void {
+fn sendSourcetableResponse(stream: io.Stream, state: *ServerState, is_v2: bool, keep_alive: bool) void {
     var arena = std.heap.ArenaAllocator.init(state.alloc);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -450,7 +453,7 @@ fn sendSourcetableResponse(stream: std.net.Stream, state: *ServerState, is_v2: b
 }
 
 /// SO_RCVTIMEO を設定する（keep-alive アイドル時間の上限）。
-fn setKeepAliveTimeout(stream: std.net.Stream, secs: u32) !void {
+fn setKeepAliveTimeout(stream: io.Stream, secs: u32) !void {
     const tv = std.posix.timeval{ .sec = @intCast(secs), .usec = 0 };
     try std.posix.setsockopt(
         stream.handle,
@@ -526,7 +529,7 @@ pub fn listen(state: *ServerState) !void {
 
     const addr = try std.net.Address.parseIp4("0.0.0.0", state.config.port);
     server_ptr.* = try addr.listen(.{ .reuse_address = true });
-    state.listen_address = server_ptr.listen_address;
+    state.listen_address = io.Address.fromNet(server_ptr.listen_address);
     state.listener = server_ptr;
     state.started_event.set(); // listen 準備完了を通知
 
@@ -542,9 +545,9 @@ pub fn listen(state: *ServerState) !void {
         };
 
         const args = ConnArgs{
-            .stream = conn.stream,
+            .stream = io.Stream.fromNet(conn.stream),
             .state = state,
-            .peer_addr = conn.address,
+            .peer_addr = io.Address.fromNet(conn.address),
         };
 
         const thread = std.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {

@@ -40,6 +40,14 @@ pub fn build(b: *std.Build) void {
         "vrs_inject_antenna",
         b.option(bool, "vrs-inject-antenna", "Inject RTCM3 Type 1008 antenna descriptor for VRS rovers") orelse false,
     );
+    // I/O backend 選択 (src/io.zig)。posix=host/Linux/クラウド、lwip=ESP-IDF(Tab5)。
+    // lwip backend は未実装 (io_lwip.zig TODO)。host ビルドは posix のまま。
+    const IoBackend = enum { posix, lwip };
+    options_step.addOption(
+        IoBackend,
+        "io_backend",
+        b.option(IoBackend, "io-backend", "I/O backend: posix (host/cloud) or lwip (ESP-IDF/Tab5)") orelse .posix,
+    );
     const options_mod = options_step.createModule();
 
     // ── "ntripcaster" library module (src/ tree exposed for tests) ──────────

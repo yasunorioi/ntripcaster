@@ -16,6 +16,7 @@
 //!   - Phase B で /api/v1/events (SSE) と / (UI) を追加
 
 const std = @import("std");
+const io = @import("../io.zig");
 const server_mod = @import("../server.zig");
 const stats = @import("stats.zig");
 
@@ -38,8 +39,9 @@ pub const AdminState = struct {
     /// listen() がポートを bind した瞬間に set される
     started_event: std.Thread.ResetEvent = .{},
     /// 実際にバインドされたアドレス
-    listen_address: std.net.Address = undefined,
-    /// active なリスナー（shutdown() で deinit + free）
+    listen_address: io.Address = undefined,
+    /// active なリスナー（shutdown() で deinit + free）。listener は backend 固有
+    /// (posix: std.net.Server)。lwip 移植時にここを差し替える。
     listener: ?*std.net.Server = null,
     /// shutdown() 時のリスナー free に使う
     alloc: std.mem.Allocator,
@@ -61,7 +63,7 @@ pub fn listen(admin: *AdminState) !void {
 
     const addr = try std.net.Address.parseIp(admin.bind, admin.port);
     listener_ptr.* = try addr.listen(.{ .reuse_address = true });
-    admin.listen_address = listener_ptr.listen_address;
+    admin.listen_address = io.Address.fromNet(listener_ptr.listen_address);
     admin.listener = listener_ptr;
     admin.started_event.set();
 
@@ -76,7 +78,7 @@ pub fn listen(admin: *AdminState) !void {
             break;
         };
 
-        const args = ConnArgs{ .stream = conn.stream, .admin = admin };
+        const args = ConnArgs{ .stream = io.Stream.fromNet(conn.stream), .admin = admin };
         const t = std.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
             admin.state.logger.warn("admin Thread.spawn failed: {}", .{err});
             conn.stream.close();
@@ -87,7 +89,7 @@ pub fn listen(admin: *AdminState) !void {
 }
 
 const ConnArgs = struct {
-    stream: std.net.Stream,
+    stream: io.Stream,
     admin: *AdminState,
 };
 
@@ -98,7 +100,7 @@ fn handleConnection(args: ConnArgs) void {
     };
 }
 
-fn handleRequest(stream: std.net.Stream, admin: *AdminState) !void {
+fn handleRequest(stream: io.Stream, admin: *AdminState) !void {
     var header_buf: [4096]u8 = undefined;
     const header_len = readHeader(stream, &header_buf) catch {
         try sendStatus(stream, 400, "Bad Request", "text/plain", "bad request\n");
@@ -149,7 +151,7 @@ fn handleRequest(stream: std.net.Stream, admin: *AdminState) !void {
 
 /// SSE: 1 秒間隔で composite snapshot を data: イベントで配信。
 /// 書き込み失敗（クライアント切断）でループを抜ける。
-fn handleSse(stream: std.net.Stream, admin: *AdminState) !void {
+fn handleSse(stream: io.Stream, admin: *AdminState) !void {
     const headers =
         "HTTP/1.0 200 OK\r\n" ++
         "Content-Type: text/event-stream\r\n" ++
@@ -193,7 +195,7 @@ fn parseRequestLine(header: []const u8) ?RequestLine {
     return .{ .method = method, .path = path };
 }
 
-fn readHeader(stream: std.net.Stream, buf: []u8) !usize {
+fn readHeader(stream: io.Stream, buf: []u8) !usize {
     var total: usize = 0;
     while (total < buf.len) {
         const n = try stream.read(buf[total..]);
@@ -235,7 +237,7 @@ fn checkBasicAuth(header: []const u8, user: []const u8, password: []const u8) bo
     return false;
 }
 
-fn sendUnauthorized(stream: std.net.Stream) !void {
+fn sendUnauthorized(stream: io.Stream) !void {
     const body = "unauthorized\n";
     var buf: [256]u8 = undefined;
     const head = try std.fmt.bufPrint(
@@ -252,7 +254,7 @@ fn sendUnauthorized(stream: std.net.Stream) !void {
 }
 
 fn sendStatus(
-    stream: std.net.Stream,
+    stream: io.Stream,
     status: u16,
     reason: []const u8,
     content_type: []const u8,
@@ -289,7 +291,7 @@ fn writeClientsAdapter(out: *std.ArrayList(u8), alloc: std.mem.Allocator, admin:
     return stats.writeClientsJson(out, alloc, admin.state);
 }
 
-fn sendJsonBody(stream: std.net.Stream, admin: *AdminState, writer: *const JsonWriter) !void {
+fn sendJsonBody(stream: io.Stream, admin: *AdminState, writer: *const JsonWriter) !void {
     var arena = std.heap.ArenaAllocator.init(admin.alloc);
     defer arena.deinit();
     const alloc = arena.allocator();
