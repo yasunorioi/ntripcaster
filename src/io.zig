@@ -20,12 +20,16 @@
 const std = @import("std");
 const build_options = @import("build_options");
 
-/// true なら ESP-IDF/lwIP backend。現状 posix のみ実装済み。
+/// true なら ESP-IDF/lwIP backend。
 pub const use_lwip = build_options.io_backend == .lwip;
+
+/// lwip backend の実装。posix build では comptime-false 分岐に置くことで
+/// io_lwip.zig (lwIP ヘッダ依存) が parse されないようにする。
+const lwip = if (use_lwip) @import("io_lwip.zig") else struct {};
 
 /// ソケットハンドル型。posix=fd_t、lwip=c_int (lwip socket descriptor)。
 /// source.zig が reconnect の外部 shutdown 用に atomic で保持する型でもある。
-pub const Handle = if (use_lwip) c_int else std.posix.fd_t;
+pub const Handle = if (use_lwip) lwip.Handle else std.posix.fd_t;
 
 /// 双方向 TCP ストリーム。ハンドラ群が末端まで貫通させる型。
 ///
@@ -46,18 +50,23 @@ pub const Stream = struct {
         return .{ .handle = self.handle };
     }
 
-    pub fn read(self: Stream, buffer: []u8) std.net.Stream.ReadError!usize {
-        if (use_lwip) @compileError("lwip backend TODO: io_lwip.read (lwip_read)");
+    // 戻り値の error set は backend 非依存にするため anyerror。ハンドラ側は
+    // どこも catch/return するだけで error 種別を検査しないので実害なし。
+    pub fn read(self: Stream, buffer: []u8) anyerror!usize {
+        if (use_lwip) return lwip.read(self.handle, buffer);
         return self.asNet().read(buffer);
     }
 
-    pub fn writeAll(self: Stream, bytes: []const u8) std.net.Stream.WriteError!void {
-        if (use_lwip) @compileError("lwip backend TODO: io_lwip.writeAll (lwip_write loop)");
+    pub fn writeAll(self: Stream, bytes: []const u8) anyerror!void {
+        if (use_lwip) return lwip.writeAll(self.handle, bytes);
         return self.asNet().writeAll(bytes);
     }
 
     pub fn close(self: Stream) void {
-        if (use_lwip) @compileError("lwip backend TODO: io_lwip.close (lwip_close)");
+        if (use_lwip) {
+            lwip.close(self.handle);
+            return;
+        }
         self.asNet().close();
     }
 };
@@ -66,7 +75,7 @@ pub const Stream = struct {
 /// posix backend は std.net の DNS 解決 + connect に委譲。lwip backend では
 /// lwip の getaddrinfo/connect に置換する。
 pub fn tcpConnectToHost(alloc: std.mem.Allocator, name: []const u8, port: u16) !Stream {
-    if (use_lwip) @compileError("lwip backend TODO: io_lwip.tcpConnectToHost");
+    if (use_lwip) return Stream{ .handle = try lwip.tcpConnectToHost(alloc, name, port) };
     const s = try std.net.tcpConnectToHost(alloc, name, port);
     return Stream.fromNet(s);
 }
