@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const io = @import("../io.zig");
+const os = @import("../os.zig");
 const msm7 = @import("msm7.zig");
 const ephemeris = @import("ephemeris.zig");
 const rtcm3 = @import("../ntrip/rtcm3.zig");
@@ -65,7 +66,7 @@ pub const Upstream = struct {
     logger: log_mod.Logger,
 
     /// 蓄積バッファ (lock で保護)
-    lock: std.Thread.Mutex,
+    lock: os.Mutex,
     coord: ?msm7.StationCoord,
     /// (prn, band) → 最新観測。新着で上書き、古いエントリは snapshot 時に除外。
     /// ArrayList ではなく Map にすることで「station A のみ更新が遅い」レースを回避。
@@ -88,7 +89,7 @@ pub const Upstream = struct {
     passthrough_fn: ?PassthroughFn,
 
     /// スレッド (start() で spawn、stop()/join() で終了)
-    thread: ?std.Thread,
+    thread: ?os.Thread,
 
     pub fn create(alloc: std.mem.Allocator, cfg: Config, logger: log_mod.Logger) !*Upstream {
         const u = try alloc.create(Upstream);
@@ -140,7 +141,7 @@ pub const Upstream = struct {
 
     /// バックグラウンドスレッド開始
     pub fn start(self: *Upstream) !void {
-        self.thread = try std.Thread.spawn(.{}, runLoop, .{self});
+        self.thread = try os.Thread.spawn(.{}, runLoop, .{self});
     }
 
     /// 終了通知 + join (呼び出し側スレッドをブロックする)
@@ -240,24 +241,15 @@ fn sleepInterruptible(self: *Upstream, ms: u64) void {
     const tick: u64 = 100;
     while (remaining > 0 and self.active.load(.seq_cst)) {
         const this_sleep: u64 = @min(remaining, tick);
-        std.Thread.sleep(this_sleep * @as(u64, std.time.ns_per_ms));
+        os.sleep(this_sleep * @as(u64, std.time.ns_per_ms));
         remaining -= this_sleep;
     }
 }
 
-/// socket に SO_RCVTIMEO を設定する。secs == 0 で無効化。
-fn setRecvTimeout(stream: io.Stream, secs: u32) !void {
-    const tv = std.posix.timeval{
-        .sec = @intCast(secs),
-        .usec = 0,
-    };
-    const bytes = std.mem.asBytes(&tv);
-    try std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.RCVTIMEO,
-        bytes,
-    );
+/// socket に SO_RCVTIMEO を設定する。secs == 0 で無効化。backend 差は
+/// io.setRecvTimeoutMs が吸収する。
+fn setRecvTimeout(stream: io.Stream, secs: u32) void {
+    io.setRecvTimeoutMs(stream.handle, secs * 1000);
 }
 
 /// NTRIP caster に GET 接続 → ICY 200 OK 確認まで
@@ -267,7 +259,7 @@ fn connect(self: *Upstream) !io.Stream {
 
     // ICY 待ち中に上流が応答しないと無限ハングするので、接続フェーズだけ短い
     // read timeout を入れる (15 秒)。読み始めたら無音検出は data_timeout_ms に任せる。
-    setRecvTimeout(stream, 15) catch {};
+    setRecvTimeout(stream, 15);
 
     // GET リクエスト送信
     try sendGet(self, stream);
@@ -284,7 +276,7 @@ fn connect(self: *Upstream) !io.Stream {
     }
 
     // 読み込みフェーズに入ったら timeout を長めに (ストール検知は data_timeout_ms で別途)
-    setRecvTimeout(stream, @intCast(self.cfg.data_timeout_ms / 1000 + 5)) catch {};
+    setRecvTimeout(stream, @intCast(self.cfg.data_timeout_ms / 1000 + 5));
 
     return stream;
 }

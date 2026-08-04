@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const io = @import("../io.zig");
+const os = @import("../os.zig");
 const server_mod = @import("../server.zig");
 const stats = @import("stats.zig");
 
@@ -37,18 +38,18 @@ pub const AdminState = struct {
     server_started_at_ms: i64,
 
     /// listen() がポートを bind した瞬間に set される
-    started_event: std.Thread.ResetEvent = .{},
+    started_event: os.ResetEvent = .{},
     /// 実際にバインドされたアドレス
     listen_address: io.Address = undefined,
-    /// active なリスナー（shutdown() で deinit + free）。listener は backend 固有
-    /// (posix: std.net.Server)。lwip 移植時にここを差し替える。
-    listener: ?*std.net.Server = null,
+    /// active なリスナー（shutdown() で deinit + free）。backend 差は
+    /// io.Listener が吸収する。
+    listener: ?*io.Listener = null,
     /// shutdown() 時のリスナー free に使う
     alloc: std.mem.Allocator,
 
     pub fn shutdown(self: *AdminState) void {
         if (self.listener) |l| {
-            std.posix.shutdown(l.stream.handle, .both) catch {};
+            l.shutdownAccept();
             l.deinit();
             self.alloc.destroy(l);
             self.listener = null;
@@ -58,12 +59,11 @@ pub const AdminState = struct {
 
 /// admin リスナーのメインループ。state.shutdown() を呼ぶと終了する。
 pub fn listen(admin: *AdminState) !void {
-    const listener_ptr = try admin.alloc.create(std.net.Server);
+    const listener_ptr = try admin.alloc.create(io.Listener);
     errdefer admin.alloc.destroy(listener_ptr);
 
-    const addr = try std.net.Address.parseIp(admin.bind, admin.port);
-    listener_ptr.* = try addr.listen(.{ .reuse_address = true });
-    admin.listen_address = io.Address.fromNet(listener_ptr.listen_address);
+    listener_ptr.* = try io.Listener.bind(admin.bind, admin.port);
+    admin.listen_address = listener_ptr.listenAddress();
     admin.listener = listener_ptr;
     admin.started_event.set();
 
@@ -78,8 +78,8 @@ pub fn listen(admin: *AdminState) !void {
             break;
         };
 
-        const args = ConnArgs{ .stream = io.Stream.fromNet(conn.stream), .admin = admin };
-        const t = std.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
+        const args = ConnArgs{ .stream = conn.stream, .admin = admin };
+        const t = os.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
             admin.state.logger.warn("admin Thread.spawn failed: {}", .{err});
             conn.stream.close();
             continue;
@@ -177,7 +177,7 @@ fn handleSse(stream: io.Stream, admin: *AdminState) !void {
         body.appendSlice(a, "\n\n") catch return;
 
         stream.writeAll(body.items) catch break;
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        os.sleep(1 * std.time.ns_per_s);
     }
 }
 

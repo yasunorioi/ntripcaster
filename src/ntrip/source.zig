@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const io = @import("../io.zig");
+const os = @import("../os.zig");
 const server = @import("../server.zig");
 const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
@@ -34,7 +35,7 @@ pub const Source = struct {
     msg_types: std.AutoHashMapUnmanaged(u16, u32),
     /// msg_types / bytes_in / last_data_at_ms をまとめて保護する Mutex。
     /// 32-bit ARM/MIPSEL で 64-bit atomic が無いため、Mutex で u64/i64 を直接保護する。
-    msg_lock: std.Thread.Mutex,
+    msg_lock: os.Mutex,
 
     // ── Telemetry ───────────────────────────────────────────────────────
     /// 接続元アドレス（accept() 時点）
@@ -196,7 +197,7 @@ pub fn handleSource(
         // 全クライアントが clientLoop を抜けるまで待機（最大 2 秒）
         var waited: u32 = 0;
         while (src.client_count.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            os.sleep(10 * std.time.ns_per_ms);
         }
         src.destroy();
     }
@@ -365,7 +366,7 @@ pub fn runLocalSource(
         // 全クライアントが clientLoop を抜けるまで待機（最大 2 秒）
         var waited: u32 = 0;
         while (src.client_count.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            os.sleep(10 * std.time.ns_per_ms);
         }
         src.destroy();
     }
@@ -377,7 +378,7 @@ pub fn runLocalSource(
         if (n < 0) break; // 恒久エラー
         if (n == 0) {
             // まだデータ無し（StreamBuffer timeout 等）。CPU を明け渡して継続。
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            os.sleep(10 * std.time.ns_per_ms);
             continue;
         }
         feeder.feed(src, buf[0..@intCast(n)]);

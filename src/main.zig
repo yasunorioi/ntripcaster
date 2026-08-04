@@ -4,6 +4,7 @@
 //!   ntripcaster -c /etc/ntripcaster/ntripcaster.conf
 
 const std = @import("std");
+const os = @import("os.zig");
 const parser = @import("config/parser.zig");
 const server_mod = @import("server.zig");
 const admin_server = @import("admin/server.zig");
@@ -104,9 +105,9 @@ pub fn main() !void {
         .server_started_at_ms = started_at_ms,
         .alloc = allocator,
     };
-    var admin_thread: ?std.Thread = null;
+    var admin_thread: ?os.Thread = null;
     if (config.admin_enable) {
-        admin_thread = std.Thread.spawn(.{}, admin_server.listen, .{&admin}) catch |err| blk: {
+        admin_thread = os.Thread.spawn(.{}, admin_server.listen, .{&admin}) catch |err| blk: {
             state.logger.err("admin spawn failed: {}", .{err});
             break :blk null;
         };

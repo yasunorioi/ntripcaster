@@ -10,6 +10,7 @@
 //!     reader 間競合が解消される
 
 const std = @import("std");
+const os = @import("../os.zig");
 
 /// RTCMデータのリングバッファ。ソース→クライアントへの透過転送に使用。
 ///
@@ -29,7 +30,7 @@ pub const RingBuffer = struct {
     /// reader / writer 分離: writer (writeChunk) は exclusive、reader
     /// (readChunk / currentWritePos) は shared。複数 client が同時に
     /// readChunk しても reader 同士は競合しない。
-    lock: std.Thread.RwLock = .{},
+    lock: os.RwLock = .{},
 
     /// ソースからのデータをリングバッファに格納する。
     ///

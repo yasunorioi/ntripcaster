@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const io = @import("../io.zig");
+const os = @import("../os.zig");
 const server = @import("../server.zig");
 const auth = @import("../auth/basic.zig");
 const protocol = @import("protocol.zig");
@@ -33,7 +34,7 @@ pub const Client = struct {
     /// 送信累積バイト数（stat_lock で保護。32-bit 環境で 64-bit atomic が無いため Mutex 使用）
     bytes_out: u64,
     /// stat_lock: bytes_out を保護する
-    stat_lock: std.Thread.Mutex,
+    stat_lock: os.Mutex,
     /// 接続確立ミリ秒タイムスタンプ
     started_at_ms: i64,
 
@@ -259,7 +260,7 @@ fn clientLoop(stream: io.Stream, src: *server.Source, client: *Client, is_v2: bo
             read_pos = r.next_pos;
         } else {
             // データ待ち: CPU を占有しないよう短時間スリープ
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            os.sleep(10 * std.time.ns_per_ms);
         }
     }
 

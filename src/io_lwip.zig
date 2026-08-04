@@ -75,3 +75,62 @@ pub fn tcpConnectToHost(alloc: std.mem.Allocator, name: []const u8, port: u16) a
     }
     return fd;
 }
+
+// ── inbound listener / accept (rover-facing caster sockets) ──────────────────
+
+/// bind + listen on `ip`:`port` (IPv4). Returns the listening socket fd.
+pub fn listen(ip: [4]u8, port: u16) anyerror!Handle {
+    const fd = c.lwip_socket(c.AF_INET, c.SOCK_STREAM, 0);
+    if (fd < 0) return error.SocketFailed;
+    errdefer _ = c.lwip_close(fd);
+
+    const one: c_int = 1;
+    _ = c.lwip_setsockopt(fd, c.SOL_SOCKET, c.SO_REUSEADDR, &one, @sizeOf(c_int));
+
+    var sa = std.mem.zeroes(c.struct_sockaddr_in);
+    sa.sin_family = c.AF_INET;
+    sa.sin_port = std.mem.nativeToBig(u16, port);
+    // sin_addr は network byte order。ip[0] が最上位オクテット。
+    sa.sin_addr.s_addr = @bitCast(ip);
+
+    if (c.lwip_bind(fd, @ptrCast(&sa), @sizeOf(@TypeOf(sa))) != 0) return error.BindFailed;
+    if (c.lwip_listen(fd, 8) != 0) return error.ListenFailed;
+    return fd;
+}
+
+/// accept() の戻り: 接続 fd + peer の IPv4/port。io.zig 側で io.Address に包む。
+pub const Accepted = struct { fd: Handle, ip: [4]u8, port: u16 };
+
+pub fn accept(listen_fd: Handle) anyerror!Accepted {
+    var sa = std.mem.zeroes(c.struct_sockaddr_in);
+    var len: c.socklen_t = @sizeOf(@TypeOf(sa));
+    const fd = c.lwip_accept(listen_fd, @ptrCast(&sa), &len);
+    if (fd < 0) return error.AcceptFailed;
+    const ip: [4]u8 = @bitCast(sa.sin_addr.s_addr);
+    return .{ .fd = fd, .ip = ip, .port = std.mem.bigToNative(u16, sa.sin_port) };
+}
+
+/// SHUT_RDWR: ブロック中の accept()/read() を叩き起こす。
+pub fn shutdownBoth(handle: Handle) void {
+    _ = c.lwip_shutdown(handle, c.SHUT_RDWR);
+}
+
+// ── socket options ───────────────────────────────────────────────────────────
+// ESP-IDF の lwIP は SO_RCVTIMEO/SO_SNDTIMEO を struct timeval で受ける
+// (LWIP_SO_RCVTIMEO=1)。定数名は BSD と同じ。
+
+pub const SO_RCVTIMEO = c.SO_RCVTIMEO;
+pub const SO_SNDTIMEO = c.SO_SNDTIMEO;
+
+pub fn setSockTimeoutMs(handle: Handle, optname: c_int, ms: u32) void {
+    const tv = c.struct_timeval{ .tv_sec = @intCast(ms / 1000), .tv_usec = @intCast((ms % 1000) * 1000) };
+    _ = c.lwip_setsockopt(handle, c.SOL_SOCKET, optname, &tv, @sizeOf(@TypeOf(tv)));
+}
+
+pub fn enableKeepAlive(handle: Handle, idle_secs: c_int, intvl_secs: c_int, count: c_int) void {
+    const one: c_int = 1;
+    _ = c.lwip_setsockopt(handle, c.SOL_SOCKET, c.SO_KEEPALIVE, &one, @sizeOf(c_int));
+    _ = c.lwip_setsockopt(handle, c.IPPROTO_TCP, c.TCP_KEEPIDLE, &idle_secs, @sizeOf(c_int));
+    _ = c.lwip_setsockopt(handle, c.IPPROTO_TCP, c.TCP_KEEPINTVL, &intvl_secs, @sizeOf(c_int));
+    _ = c.lwip_setsockopt(handle, c.IPPROTO_TCP, c.TCP_KEEPCNT, &count, @sizeOf(c_int));
+}

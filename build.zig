@@ -147,4 +147,30 @@ pub fn build(b: *std.Build) void {
     b.step("test-integration", "Run integration tests (TCP)").dependOn(
         &b.addRunArtifact(int_tests).step,
     );
+
+    // ── Embedded static library (M2: ESP-IDF/Tab5 link target) ─────────────
+    // ESP-IDF の CMake component がこの成果物 (libntripcaster.a) を firmware に
+    // リンクする。cross-compile の健全性検証用にも使う:
+    //   zig build caster-lib -Dio-backend=lwip \
+    //     -Dtarget=riscv32-freestanding -Dcpu=generic_rv32+m+a+f+c
+    const caster_lib = b.addLibrary(.{
+        .name = "ntripcaster",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/embedded.zig"),
+            .target = target,
+            .optimize = optimize,
+            // ESP-IDF provides newlib (malloc/free → PSRAM) and pthread. Zig
+            // needs libc "declared" to permit the extern "c" allocator decls;
+            // the actual symbols are resolved by the IDF final link. On the host
+            // this links the system libc for real (so the lib is host-buildable).
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "build_options", .module = options_mod },
+            },
+        }),
+    });
+    b.step("caster-lib", "Build embedded static library (ESP-IDF link target)").dependOn(
+        &b.addInstallArtifact(caster_lib, .{}).step,
+    );
 }

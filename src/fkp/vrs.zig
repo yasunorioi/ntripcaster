@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const io = @import("../io.zig");
+const os = @import("../os.zig");
 const parser = @import("../config/parser.zig");
 const server = @import("../server.zig");
 const source_mod = @import("../ntrip/source.zig");
@@ -69,7 +70,7 @@ pub const VrsRover = struct {
 
     /// 最新の GGA から得た rover 位置 [deg, deg, m]
     /// has_position == false のあいだは合成停止 (= rover にデータ流さない)
-    lock: std.Thread.Mutex = .{},
+    lock: os.Mutex = .{},
     has_position: bool = false,
     lat_deg: f64 = 0.0,
     lon_deg: f64 = 0.0,
@@ -146,7 +147,7 @@ pub const Runtime = struct {
     fkp_rt: ?*fkp_runtime.Runtime,
 
     /// 接続中の rover (id → VrsRover*)
-    rover_lock: std.Thread.Mutex = .{},
+    rover_lock: os.Mutex = .{},
     rovers: std.AutoHashMap(u64, *VrsRover),
 
     pub fn create(
@@ -330,7 +331,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
 
     // GGA を polling するため rover stream に短い read timeout を入れる。
     // upstream.zig と同じ手法 (SO_RCVTIMEO)。Linux では tv_usec = 100ms。
-    setRecvTimeoutMs(rover.stream, 100) catch {};
+    setRecvTimeoutMs(rover.stream, 100);
 
     while (fkp_src.active.load(.seq_cst)) {
         // 1) rover stream を polling して GGA を読みに行く
@@ -360,7 +361,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
             }
             parse_len = remaining;
         } else {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
+            os.sleep(20 * std.time.ns_per_ms);
         }
 
         const now = std.time.milliTimestamp();
@@ -429,18 +430,8 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
 
 // ── GGA 読み取り ─────────────────────────────────────────────────────────
 
-fn setRecvTimeoutMs(stream: io.Stream, ms: u32) !void {
-    const tv = std.posix.timeval{
-        .sec = @intCast(ms / 1000),
-        .usec = @intCast((ms % 1000) * 1000),
-    };
-    const bytes = std.mem.asBytes(&tv);
-    try std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.RCVTIMEO,
-        bytes,
-    );
+fn setRecvTimeoutMs(stream: io.Stream, ms: u32) void {
+    io.setRecvTimeoutMs(stream.handle, ms);
 }
 
 /// rover stream から (短い timeout で) 1 回読み、改行で行をまとめて GGA を抽出する。

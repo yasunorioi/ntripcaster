@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const io = @import("io.zig");
+const os = @import("os.zig");
 const parser = @import("config/parser.zig");
 const auth = @import("auth/basic.zig");
 const protocol = @import("ntrip/protocol.zig");
@@ -79,10 +80,10 @@ pub const ClientSnapshot = struct {
 pub const ServerState = struct {
     config: *parser.Config,
     sources: std.StringHashMap(*Source),
-    source_lock: std.Thread.Mutex,
+    source_lock: os.Mutex,
     clients: std.AutoHashMap(u64, *Client),
     /// clients マップと next_client_id_value を保護する Mutex
-    client_lock: std.Thread.Mutex,
+    client_lock: os.Mutex,
     /// 採番済みクライアント ID（client_lock で保護）
     next_client_id_value: u64,
     alloc: std.mem.Allocator,
@@ -90,11 +91,10 @@ pub const ServerState = struct {
     /// sourcetable.dat を探すディレクトリ
     conf_dir: []const u8,
     /// ヒープ上の TCP リスナー（shutdown() で deinit + free する）。
-    /// listener 自体は backend 固有 (posix: std.net.Server)。lwip 移植時は
-    /// ここを io_lwip の listener に差し替える。
-    listener: ?*std.net.Server,
+    /// backend 差は io.Listener が吸収 (posix: std.net.Server / lwip: lwip fd)。
+    listener: ?*io.Listener,
     /// サーバーが listen() に入ったことを通知するイベント
-    started_event: std.Thread.ResetEvent,
+    started_event: os.ResetEvent,
     /// 実際にバインドされたアドレス（started_event.wait() 後に読める）
     listen_address: io.Address,
     /// 接続中ハンドラースレッド数（deinit() 内でゼロを待機する）
@@ -130,7 +130,7 @@ pub const ServerState = struct {
         // ハンドラースレッドが全て終了するまで待機（最大2秒）
         var waited: u32 = 0;
         while (self.active_handlers.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            os.sleep(10 * std.time.ns_per_ms);
         }
         {
             self.source_lock.lock();
@@ -156,7 +156,7 @@ pub const ServerState = struct {
     pub fn shutdown(self: *ServerState) void {
         if (self.listener) |l| {
             // shutdown() でブロック中の accept() を起床させてから deinit()
-            std.posix.shutdown(l.stream.handle, .both) catch {};
+            l.shutdownAccept();
             l.deinit();
             self.alloc.destroy(l);
             self.listener = null;
@@ -212,7 +212,7 @@ pub const ServerState = struct {
         // socket 強制 shutdown (read() が即エラーで戻る)
         old.active.store(false, .seq_cst);
         const fd = old.stream_handle.load(.seq_cst);
-        if (fd >= 0) std.posix.shutdown(fd, .both) catch {};
+        if (fd >= 0) io.shutdownHandle(fd);
         _ = self.sources.remove(mount);
         // 旧 source struct は handleSource の defer が destroy する。
         // ここでは触らない。
@@ -452,15 +452,10 @@ fn sendSourcetableResponse(stream: io.Stream, state: *ServerState, is_v2: bool, 
     stream.writeAll(resp) catch {};
 }
 
-/// SO_RCVTIMEO を設定する（keep-alive アイドル時間の上限）。
-fn setKeepAliveTimeout(stream: io.Stream, secs: u32) !void {
-    const tv = std.posix.timeval{ .sec = @intCast(secs), .usec = 0 };
-    try std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.RCVTIMEO,
-        std.mem.asBytes(&tv),
-    );
+/// SO_RCVTIMEO を設定する（keep-alive アイドル時間の上限）。backend 差は
+/// io.setRecvTimeout が吸収する (posix: setsockopt / lwip: lwip_setsockopt)。
+fn setKeepAliveTimeout(stream: io.Stream, secs: u32) void {
+    io.setRecvTimeoutMs(stream.handle, secs * 1000);
 }
 
 /// V2 client-side keep-alive の上限（1 コネクション内のリクエスト最大数とアイドル秒数）。
@@ -483,7 +478,7 @@ fn handleConnection(args: ConnArgs) void {
     while (request_count < MAX_REQUESTS_PER_CONN) : (request_count += 1) {
         // 2 回目以降は idle 読み取りタイムアウトを設定（DOS 対策）。
         if (request_count == 1) {
-            setKeepAliveTimeout(args.stream, KEEP_ALIVE_IDLE_SECS) catch {};
+            setKeepAliveTimeout(args.stream, KEEP_ALIVE_IDLE_SECS);
         }
 
         var header_buf: [4096]u8 = undefined;
@@ -524,13 +519,12 @@ fn handleConnection(args: ConnArgs) void {
 /// TCP リスナーを起動して接続を受け付けるメインループ。
 /// state.shutdown() を呼ぶとループを抜ける。
 pub fn listen(state: *ServerState) !void {
-    const server_ptr = try state.alloc.create(std.net.Server);
-    errdefer state.alloc.destroy(server_ptr);
+    const listener_ptr = try state.alloc.create(io.Listener);
+    errdefer state.alloc.destroy(listener_ptr);
 
-    const addr = try std.net.Address.parseIp4("0.0.0.0", state.config.port);
-    server_ptr.* = try addr.listen(.{ .reuse_address = true });
-    state.listen_address = io.Address.fromNet(server_ptr.listen_address);
-    state.listener = server_ptr;
+    listener_ptr.* = try io.Listener.bind("0.0.0.0", state.config.port);
+    state.listen_address = listener_ptr.listenAddress();
+    state.listener = listener_ptr;
     state.started_event.set(); // listen 準備完了を通知
 
     state.logger.info(
@@ -539,18 +533,18 @@ pub fn listen(state: *ServerState) !void {
     );
 
     while (true) {
-        const conn = server_ptr.accept() catch |err| {
+        const conn = listener_ptr.accept() catch |err| {
             state.logger.info("accept() stopped: {}", .{err});
             break;
         };
 
         const args = ConnArgs{
-            .stream = io.Stream.fromNet(conn.stream),
+            .stream = conn.stream,
             .state = state,
-            .peer_addr = io.Address.fromNet(conn.address),
+            .peer_addr = conn.address,
         };
 
-        const thread = std.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
+        const thread = os.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
             state.logger.warn("Thread.spawn failed: {}", .{err});
             conn.stream.close();
             continue;
