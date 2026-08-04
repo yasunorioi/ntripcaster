@@ -183,6 +183,10 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .root_module = caster_mod,
     });
+    // Bundle compiler-rt into the archive: std.fmt's float formatter pulls in
+    // 128-bit division (__udivti3) which the riscv32 libgcc esp-idf links does
+    // not provide. Zig's compiler-rt has it.
+    caster_lib.bundle_compiler_rt = true;
     b.step("caster-lib", "Build embedded static library (ESP-IDF link target)").dependOn(
         &b.addInstallArtifact(caster_lib, .{}).step,
     );
