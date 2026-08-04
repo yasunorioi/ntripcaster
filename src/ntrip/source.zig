@@ -50,8 +50,8 @@ pub const Source = struct {
     /// （msg_lock で保護）
     station: ?rtcm3.StationCoord,
     /// このソース由来で client が BufferOverrun (= ring buffer 追従失敗)
-    /// で切断された累積回数
-    overrun_disconnects: std.atomic.Value(u64),
+    /// で切断された累積回数。u32 (rv32 は 64-bit atomic RMW 非対応、桁数も十分)。
+    overrun_disconnects: std.atomic.Value(u32),
     /// このソースの TCP ストリームの fd。新規 SOURCE がこの mount に
     /// 来たとき、既存接続を外から shutdown して reconnect を即時通すために
     /// 持っておく。null の場合は handleSource がまだ設定していない瞬間。
@@ -63,7 +63,7 @@ pub const Source = struct {
         peer_addr: io.Address,
     ) !*Source {
         const s = try alloc.create(Source);
-        const now = std.time.milliTimestamp();
+        const now = os.milliTimestamp();
         s.* = .{
             .mount = try alloc.dupe(u8, mount),
             .ring = .{},
@@ -78,7 +78,7 @@ pub const Source = struct {
             .started_at_ms = now,
             .last_data_at_ms = now,
             .station = null,
-            .overrun_disconnects = std.atomic.Value(u64).init(0),
+            .overrun_disconnects = std.atomic.Value(u32).init(0),
             .stream_handle = std.atomic.Value(io.Handle).init(-1),
         };
         return s;
@@ -273,7 +273,7 @@ pub const SourceFeeder = struct {
         if (chunk.len == 0) return;
 
         // Telemetry: 受信バイト数と最終受信時刻を更新（msg_lock 保護下で u64 を書き換え）
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = os.milliTimestamp();
         src.msg_lock.lock();
         src.bytes_in += chunk.len;
         src.last_data_at_ms = now_ms;

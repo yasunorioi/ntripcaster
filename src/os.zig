@@ -60,3 +60,17 @@ pub fn consoleWrite(bytes: []const u8) void {
     if (use_lwip) return lwip.consoleWrite(bytes);
     std.fs.File.stderr().writeAll(bytes) catch {};
 }
+
+/// Milliseconds since an arbitrary epoch. Posix: wall-clock (std.time). lwip:
+/// microseconds-since-boot / 1000 (esp_timer, monotonic) — the caster only
+/// takes differences (idle timeouts, uptime), so a boot epoch is fine.
+pub fn milliTimestamp() i64 {
+    if (use_lwip) return lwip.milliTimestamp();
+    return std.time.milliTimestamp();
+}
+
+/// Seconds since an arbitrary epoch (log line stamps). Same epoch caveat.
+pub fn timestamp() i64 {
+    if (use_lwip) return lwip.timestamp();
+    return std.time.timestamp();
+}

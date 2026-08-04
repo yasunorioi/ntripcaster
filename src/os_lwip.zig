@@ -28,6 +28,7 @@ const c = @cImport({
     @cInclude("freertos/task.h");
     @cInclude("freertos/semphr.h");
     @cInclude("freertos/event_groups.h");
+    @cInclude("esp_timer.h");
 });
 
 /// Convert nanoseconds to whole FreeRTOS ticks, rounding up so a sub-tick sleep
@@ -41,6 +42,18 @@ fn nsToTicks(ns: u64) c.TickType_t {
 pub fn sleep(ns: u64) void {
     const ticks = nsToTicks(ns);
     c.vTaskDelay(if (ticks == 0) 1 else ticks);
+}
+
+// ── time (std.time.{milliTimestamp,timestamp} は posix clock_gettime に依存) ──
+// esp_timer は boot からの経過マイクロ秒 (monotonic)。caster は基本的に差分
+// (idle timeout / uptime) しか見ないので wall-clock epoch でなくても成立する。
+
+pub fn milliTimestamp() i64 {
+    return @divTrunc(c.esp_timer_get_time(), 1000);
+}
+
+pub fn timestamp() i64 {
+    return @divTrunc(c.esp_timer_get_time(), 1_000_000);
 }
 
 // ── console ──────────────────────────────────────────────────────────────────
@@ -123,8 +136,7 @@ pub const SpawnConfig = struct {
 };
 
 pub const Thread = struct {
-    task: c.TaskHandle_t = null,
-    done: ?*c.StaticSemaphore_t = null,
+    done: c.SemaphoreHandle_t = null,
 
     pub const SpawnError = error{SpawnFailed};
 
@@ -132,7 +144,6 @@ pub const Thread = struct {
         const Args = @TypeOf(args);
         const Closure = struct {
             args: Args,
-            done_buf: c.StaticSemaphore_t,
             done: c.SemaphoreHandle_t,
 
             fn entry(ctx: ?*anyopaque) callconv(.c) void {
@@ -143,15 +154,18 @@ pub const Thread = struct {
             }
         };
 
-        // Heap-box the closure (task outlives this frame). Freed by join(); a
-        // detached task's closure is intentionally leaked (process-lifetime).
-        const closure = std.heap.c_allocator.create(Closure) catch return error.SpawnFailed;
-        closure.* = .{
-            .args = args,
-            .done_buf = undefined,
-            .done = undefined,
+        // Completion semaphore (dynamic — the static variant's macro doesn't
+        // translate cleanly). join() takes it; detach() leaves it (leaked with
+        // the closure, which is fine for process-lifetime caster tasks).
+        const done = c.xSemaphoreCreateBinary();
+        if (done == null) return error.SpawnFailed;
+
+        // Heap-box the closure (task outlives this frame).
+        const closure = std.heap.c_allocator.create(Closure) catch {
+            c.vSemaphoreDelete(done);
+            return error.SpawnFailed;
         };
-        closure.done = c.xSemaphoreCreateBinaryStatic(&closure.done_buf);
+        closure.* = .{ .args = args, .done = done };
 
         var task: c.TaskHandle_t = null;
         const ok = c.xTaskCreate(
@@ -164,16 +178,14 @@ pub const Thread = struct {
         );
         if (ok != c.pdPASS) {
             std.heap.c_allocator.destroy(closure);
+            c.vSemaphoreDelete(done);
             return error.SpawnFailed;
         }
-        return .{ .task = task, .done = &closure.done_buf };
+        return .{ .done = done };
     }
 
     pub fn join(self: Thread) void {
-        if (self.done) |buf| {
-            // The completion semaphore lives inside the closure; take it, then
-            // the task has run to completion and self-deleted.
-            const sem: c.SemaphoreHandle_t = @ptrCast(buf);
+        if (self.done) |sem| {
             _ = c.xSemaphoreTake(sem, c.portMAX_DELAY);
         }
     }

@@ -25,7 +25,7 @@ pub const Logger = struct {
         };
 
         var buf: [4096]u8 = undefined;
-        const ts = std.time.timestamp();
+        const ts = os.timestamp();
 
         // タイムスタンプ + レベルのヘッダーを先頭に書く
         const header_slice = std.fmt.bufPrint(&buf, "[{d}] [{s}] ", .{ ts, prefix }) catch return;

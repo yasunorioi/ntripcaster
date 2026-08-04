@@ -117,7 +117,7 @@ pub const VrsRover = struct {
             .id = id,
             .stream = stream,
             .peer_addr = peer_addr,
-            .started_at_ms = std.time.milliTimestamp(),
+            .started_at_ms = os.milliTimestamp(),
             .alloc = alloc,
             .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)),
         };
@@ -277,7 +277,7 @@ pub const Runtime = struct {
                 rover.vrs_ref_id,
                 rover.bytes_in,
                 rover.bytes_out,
-                @divTrunc(std.time.milliTimestamp() - rover.started_at_ms, 1000),
+                @divTrunc(os.milliTimestamp() - rover.started_at_ms, 1000),
                 rover.frames_forwarded,
                 rover.frames_ref_id_rewritten,
                 rover.frames_dropped,
@@ -319,11 +319,11 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
     var parse_len: usize = 0;
 
     var last_1005_at_ms: i64 = 0;
-    var last_stats_at_ms: i64 = std.time.milliTimestamp();
+    var last_stats_at_ms: i64 = os.milliTimestamp();
     var last_stats_frames_fwd: u64 = 0;
     var last_stats_drop_1005: u64 = 0;
     var last_stats_drop_1006: u64 = 0;
-    const start_ms = std.time.milliTimestamp();
+    const start_ms = os.milliTimestamp();
 
     // rover stream 読み取り用の小バッファ + 1 行 (GGA) 切り出し用
     var gga_acc: [256]u8 = undefined;
@@ -364,7 +364,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
             os.sleep(20 * std.time.ns_per_ms);
         }
 
-        const now = std.time.milliTimestamp();
+        const now = os.milliTimestamp();
 
         // 3) 定期的に Type 1005 を rover 座標で合成して送信
         rover.lock.lock();
@@ -502,7 +502,7 @@ fn handleGgaLine(rt: ?*Runtime, rover: *VrsRover, line: []const u8) void {
     rover.lat_deg = final_lat;
     rover.lon_deg = final_lon;
     rover.alt_m = alt;
-    rover.last_gga_at_ms = std.time.milliTimestamp();
+    rover.last_gga_at_ms = os.milliTimestamp();
     const log_first = !rover.initial_gga_logged;
     rover.initial_gga_logged = true;
     rover.lock.unlock();

@@ -292,7 +292,7 @@ fn writeToVirtual(rt: *Runtime, data: []const u8) void {
     }
     rt.virtual_src.msg_lock.lock();
     rt.virtual_src.bytes_in += data.len;
-    rt.virtual_src.last_data_at_ms = std.time.milliTimestamp();
+    rt.virtual_src.last_data_at_ms = os.milliTimestamp();
     rt.virtual_src.msg_lock.unlock();
 }
 
@@ -371,7 +371,7 @@ fn runOneFkpCycle(rt: *Runtime) void {
     }
 
     // Type59 エンコード
-    const tow_ms: u32 = @truncate(@as(u64, @intCast(std.time.timestamp())) % (7 * 24 * 3600) * 1000);
+    const tow_ms: u32 = @truncate(@as(u64, @intCast(os.timestamp())) % (7 * 24 * 3600) * 1000);
     const frame = type59.encodeType59(
         alloc,
         stations.items[0].coord.ref_station_id,

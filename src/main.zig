@@ -82,7 +82,7 @@ pub fn main() !void {
     var state = server_mod.ServerState.init(allocator, &config, conf_dir);
     defer state.deinit();
 
-    const started_at_ms = std.time.milliTimestamp();
+    const started_at_ms = os.milliTimestamp();
 
     // ── 起動バナー ──────────────────────────────────────────────────────────
     state.logger.info(

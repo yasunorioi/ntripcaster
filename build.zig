@@ -153,22 +153,35 @@ pub fn build(b: *std.Build) void {
     // リンクする。cross-compile の健全性検証用にも使う:
     //   zig build caster-lib -Dio-backend=lwip \
     //     -Dtarget=riscv32-freestanding -Dcpu=generic_rv32+m+a+f+c
+    const caster_mod = b.createModule(.{
+        .root_source_file = b.path("src/embedded.zig"),
+        .target = target,
+        .optimize = optimize,
+        // ESP-IDF provides newlib (malloc/free → PSRAM) and pthread. Zig
+        // needs libc "declared" to permit the extern "c" allocator decls;
+        // the actual symbols are resolved by the IDF final link. On the host
+        // this links the system libc for real (so the lib is host-buildable).
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "build_options", .module = options_mod },
+        },
+    });
+    // ESP-IDF component ビルドが FreeRTOS/lwip の include dir 群を
+    // `NTRIPCASTER_IDF_INCLUDES` (`;` 区切り) で渡してくる。io_lwip.zig /
+    // os_lwip.zig の @cImport がこれらを解決する。host ビルド (env 未設定)
+    // では素通り。
+    if (std.process.getEnvVarOwned(b.allocator, "NTRIPCASTER_IDF_INCLUDES")) |inc| {
+        var it = std.mem.tokenizeScalar(u8, inc, ';');
+        while (it.next()) |dir| {
+            if (dir.len == 0) continue;
+            caster_mod.addSystemIncludePath(.{ .cwd_relative = dir });
+        }
+    } else |_| {}
+
     const caster_lib = b.addLibrary(.{
         .name = "ntripcaster",
         .linkage = .static,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/embedded.zig"),
-            .target = target,
-            .optimize = optimize,
-            // ESP-IDF provides newlib (malloc/free → PSRAM) and pthread. Zig
-            // needs libc "declared" to permit the extern "c" allocator decls;
-            // the actual symbols are resolved by the IDF final link. On the host
-            // this links the system libc for real (so the lib is host-buildable).
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "build_options", .module = options_mod },
-            },
-        }),
+        .root_module = caster_mod,
     });
     b.step("caster-lib", "Build embedded static library (ESP-IDF link target)").dependOn(
         &b.addInstallArtifact(caster_lib, .{}).step,

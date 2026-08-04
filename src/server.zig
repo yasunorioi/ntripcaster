@@ -205,7 +205,7 @@ pub const ServerState = struct {
         old.msg_lock.lock();
         const last_data = old.last_data_at_ms;
         old.msg_lock.unlock();
-        const now = std.time.milliTimestamp();
+        const now = os.milliTimestamp();
         if (now - last_data <= max_idle_ms) return false;
 
         // 旧 source を kill: 協調シャットダウン (active=false) +

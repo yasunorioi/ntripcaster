@@ -53,7 +53,7 @@ pub const Client = struct {
             .peer_addr = peer_addr,
             .bytes_out = 0,
             .stat_lock = .{},
-            .started_at_ms = std.time.milliTimestamp(),
+            .started_at_ms = os.milliTimestamp(),
         };
         return c;
     }

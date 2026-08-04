@@ -114,7 +114,7 @@ pub const Upstream = struct {
             .eph_store = ephemeris.EphemerisStore.init(alloc),
             .max_obs_age_ms = 10 * std.time.ms_per_s,
             .active = std.atomic.Value(bool).init(true),
-            .last_data_at_ms = std.time.milliTimestamp(),
+            .last_data_at_ms = os.milliTimestamp(),
             .passthrough_ctx = null,
             .passthrough_fn = null,
             .thread = null,
@@ -160,7 +160,7 @@ pub const Upstream = struct {
         self.lock.lock();
         defer self.lock.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = os.milliTimestamp();
         const cutoff = now - self.max_obs_age_ms;
 
         // フレッシュなエントリを数える
@@ -190,7 +190,7 @@ pub const Upstream = struct {
     pub fn millisSinceLastData(self: *Upstream) i64 {
         self.lock.lock();
         defer self.lock.unlock();
-        return std.time.milliTimestamp() - self.last_data_at_ms;
+        return os.milliTimestamp() - self.last_data_at_ms;
     }
 };
 
@@ -217,7 +217,7 @@ fn runLoop(self: *Upstream) void {
         });
         backoff_ms = 0;
         self.lock.lock();
-        self.last_data_at_ms = std.time.milliTimestamp();
+        self.last_data_at_ms = os.milliTimestamp();
         self.lock.unlock();
 
         // 受信ループ
@@ -405,7 +405,7 @@ fn readLoop(self: *Upstream, stream: io.Stream) void {
 
         // 受信時刻更新
         self.lock.lock();
-        self.last_data_at_ms = std.time.milliTimestamp();
+        self.last_data_at_ms = os.milliTimestamp();
         self.lock.unlock();
 
         // RTCM3 パース用バッファに追記 (溢れたら先頭を破棄)
@@ -479,7 +479,7 @@ fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
             const obs = msm7.extractPhase(self.alloc, payload) catch return;
             defer self.alloc.free(obs);
 
-            const now = std.time.milliTimestamp();
+            const now = os.milliTimestamp();
             self.lock.lock();
             defer self.lock.unlock();
             for (obs) |o| {
@@ -492,7 +492,7 @@ fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
         1019 => {
             // GPS broadcast ephemeris (Phase 7-1)。同一 PRN は常に上書き。
             const eph = ephemeris.parseMsg1019(payload) orelse return;
-            const now = std.time.milliTimestamp();
+            const now = os.milliTimestamp();
             self.lock.lock();
             defer self.lock.unlock();
             self.eph_store.upsertGps(eph, now) catch return;
