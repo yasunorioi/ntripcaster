@@ -133,3 +133,44 @@ fn casterMain() void {
         g_state.logger.err("caster: listener ended: {}", .{err});
     };
 }
+
+// ── observability ────────────────────────────────────────────────────────────
+
+/// Snapshot of the locally-wired /MOSAIC source, for the firmware's `csource`
+/// console command. Layout must match caster_source_stats_t in caster.h.
+const SourceStats = extern struct {
+    running: c_int, // caster_start() has been called
+    source_present: c_int, // /MOSAIC is registered (feeder is up)
+    rtcm_detected: c_int, // a valid RTCM3 frame has been parsed
+    bytes_in: u64, // bytes fed into the source ring
+    client_count: u32, // rovers currently pulling
+    num_msg_types: u32, // distinct RTCM3 message types seen
+    types: [12]u16, // up to 12 (msg_type, count) pairs
+    counts: [12]u32,
+};
+
+/// Fill `out` with the /MOSAIC source's live state. Proves the caster's feeder
+/// is draining the tee and the SourceFeeder is parsing RTCM3 — independently of
+/// the C-side monitor (which taps the primary sink).
+export fn caster_source_stats(out: *SourceStats) void {
+    out.* = std.mem.zeroes(SourceStats);
+    if (!g_started) return;
+    out.running = 1;
+
+    const src = g_state.getSource(LOCAL_MOUNT) orelse return;
+    out.source_present = 1;
+    out.client_count = src.client_count.load(.seq_cst);
+
+    src.msg_lock.lock();
+    defer src.msg_lock.unlock();
+    out.rtcm_detected = if (src.rtcm_detected) 1 else 0;
+    out.bytes_in = src.bytes_in;
+    out.num_msg_types = src.msg_types.count();
+    var it = src.msg_types.iterator();
+    var i: usize = 0;
+    while (it.next()) |e| : (i += 1) {
+        if (i >= out.types.len) break;
+        out.types[i] = e.key_ptr.*;
+        out.counts[i] = e.value_ptr.*;
+    }
+}
