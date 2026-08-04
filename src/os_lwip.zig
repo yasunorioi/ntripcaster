@@ -130,9 +130,12 @@ pub const ResetEvent = struct {
 // ── Thread ───────────────────────────────────────────────────────────────────
 
 pub const SpawnConfig = struct {
-    /// FreeRTOS task stack in bytes. The caster's per-connection handler is the
-    /// deepest user; 8 KiB matches ESP-IDF's default pthread stack.
-    stack_size: usize = 8192,
+    /// FreeRTOS task stack in BYTES (ESP-IDF xTaskCreate semantics). The caster
+    /// was written for desktop (MiB thread stacks); several hot paths put a
+    /// 4 KiB buffer on the stack (runLocalSource's CHUNK_SIZE buf,
+    /// handleConnection's header_buf), so 8 KiB overflows on FreeRTOS. 16 KiB
+    /// gives those a comfortable margin.
+    stack_size: usize = 16 * 1024,
 };
 
 pub const Thread = struct {
@@ -168,10 +171,13 @@ pub const Thread = struct {
         closure.* = .{ .args = args, .done = done };
 
         var task: c.TaskHandle_t = null;
+        // NOTE: ESP-IDF's xTaskCreate takes the stack depth in BYTES (it
+        // deviates from vanilla FreeRTOS, where it is in StackType_t words).
+        // Pass cfg.stack_size straight through — do NOT divide by the word size.
         const ok = c.xTaskCreate(
             Closure.entry,
             "caster",
-            @intCast(cfg.stack_size / @sizeOf(c.StackType_t)),
+            @intCast(cfg.stack_size),
             closure,
             5, // priority: above IDLE, below the USB host task
             &task,

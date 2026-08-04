@@ -22,10 +22,12 @@ const server = @import("server.zig");
 const source = @import("ntrip/source.zig");
 
 // ── firmware seam (main/rtcm_sink.h) ─────────────────────────────────────────
-// Consumer side of the USB→caster StreamBuffer. Blocks up to `timeout` FreeRTOS
-// ticks for >=1 byte, then returns up to `max_len`. Returns bytes read (0 on
-// timeout). TickType_t is uint32 on ESP-IDF (configUSE_16_BIT_TICKS=0).
-extern fn rtcm_sink_read(out: [*]u8, max_len: usize, timeout: u32) usize;
+// Consumer side of the caster tee. The firmware's drain task reads the primary
+// sink, feeds the monitor, then pushes the same bytes into a second StreamBuffer
+// that we drain here (a StreamBuffer allows only one reader, so the monitor and
+// the caster cannot share one). Blocks up to `timeout` ticks for >=1 byte, then
+// returns up to `max_len`. TickType_t is uint32 on ESP-IDF.
+extern fn rtcm_caster_read(out: [*]u8, max_len: usize, timeout: u32) usize;
 
 /// Mount point the locally-wired Mosaic base is published under. Rovers pull
 /// `GET /MOSAIC`. Kept short + uppercase to match sourcetable convention.
@@ -73,8 +75,8 @@ fn casterLog(
 /// caster's `source.ByteReader` contract (>0 bytes, 0 = none yet, <0 = fatal).
 fn sinkRead(ctx: *anyopaque, buf: []u8) isize {
     _ = ctx;
-    const n = rtcm_sink_read(buf.ptr, buf.len, SINK_READ_TIMEOUT_TICKS);
-    // rtcm_sink_read only returns 0 (timeout) or a positive count; it never
+    const n = rtcm_caster_read(buf.ptr, buf.len, SINK_READ_TIMEOUT_TICKS);
+    // rtcm_caster_read only returns 0 (timeout) or a positive count; it never
     // signals a permanent error, so the feeder loop runs until src.active flips.
     return @intCast(n);
 }
@@ -91,37 +93,42 @@ fn localSourceWorker() void {
 // ── C-ABI entry points (called from main/app_main.c) ─────────────────────────
 
 /// Start the caster. Call once, after the netif is up and rtcm_sink is fed.
-/// Returns 0 on success, negative on failure. Non-blocking: the TCP listener
-/// and the local-source feeder run on their own threads.
+/// Returns 0 on success, negative on failure. Non-blocking.
+///
+/// All the real work (config parse, ServerState.init, feeder spawn, listen)
+/// happens in a dedicated `casterMain` task, NOT in the caller's context — the
+/// caller is typically the console REPL task whose ~4 KiB stack overflows if we
+/// parse + build the server state on it (observed as a stack-protection fault).
 export fn caster_start() c_int {
     if (g_started) return 0;
-
-    g_config = parser.parse(allocator, "") catch |err| {
-        std.log.err("caster: config parse failed: {}", .{err});
+    g_started = true;
+    // 16 KiB: config parse + ServerState.init + hashmap building need real room.
+    _ = os.Thread.spawn(.{ .stack_size = 16 * 1024 }, casterMain, .{}) catch {
+        g_started = false;
         return -1;
     };
+    return 0;
+}
 
+/// Bootstrap task: owns the caster for the process lifetime. Parses config,
+/// builds the server state, spawns the local-source feeder, then runs the TCP
+/// listener loop (which blocks here until shutdown).
+fn casterMain() void {
+    g_config = parser.parse(allocator, "") catch |err| {
+        std.log.err("caster: config parse failed: {}", .{err});
+        return;
+    };
     g_state = server.ServerState.init(allocator, &g_config, "");
 
-    // Feeder thread: USB sink → /MOSAIC source.
+    // Feeder task: USB sink → /MOSAIC source.
     _ = os.Thread.spawn(.{}, localSourceWorker, .{}) catch |err| {
         g_state.logger.err("caster: feeder spawn failed: {}", .{err});
         g_state.deinit();
         g_config.deinit();
-        return -2;
+        return;
     };
 
-    // Listener thread: rovers pull the mount over TCP (lwip sockets).
-    _ = os.Thread.spawn(.{}, listenWorker, .{}) catch |err| {
-        g_state.logger.err("caster: listener spawn failed: {}", .{err});
-        return -3;
-    };
-
-    g_started = true;
-    return 0;
-}
-
-fn listenWorker() void {
+    g_state.logger.info("caster: starting listener on :{d}", .{g_config.port});
     server.listen(&g_state) catch |err| {
         g_state.logger.err("caster: listener ended: {}", .{err});
     };
