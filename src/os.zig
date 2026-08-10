@@ -44,6 +44,14 @@ pub const ResetEvent = if (use_lwip) lwip.ResetEvent else std.Thread.ResetEvent;
 /// FreeRTOS task wrapper exposing the same three methods.
 pub const Thread = if (use_lwip) lwip.Thread else std.Thread;
 
+/// Stack for a per-connection handler task. On lwip the handler holds two 4 KiB
+/// buffers (server.handleConnection's header_buf + clientLoop's chunk buf) live
+/// at once, plus the std.fmt / lwip-send call chain — 16 KiB overflows (observed
+/// as a stack-protection fault on real inbound connections), 32 KiB gives room.
+/// On posix, keep std.Thread's large default: 32 KiB would overflow a glibc
+/// thread (this size is in bytes for both backends).
+pub const conn_stack_size: usize = if (use_lwip) 32 * 1024 else 16 * 1024 * 1024;
+
 /// Sleep the current thread/task for `ns` nanoseconds. lwip rounds up to whole
 /// FreeRTOS ticks (vTaskDelay); sub-tick sleeps become a single-tick yield.
 pub fn sleep(ns: u64) void {

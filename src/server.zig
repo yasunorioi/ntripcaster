@@ -544,7 +544,12 @@ pub fn listen(state: *ServerState) !void {
             .peer_addr = conn.address,
         };
 
-        const thread = os.Thread.spawn(.{}, handleConnection, .{args}) catch |err| {
+        // Backend-sized handler stack (os.conn_stack_size): 32 KiB on lwip, the
+        // large std.Thread default on posix. A handler holds header_buf[4096]
+        // and (while streaming) clientLoop's buf[CHUNK_SIZE=4096] simultaneously
+        // plus the std.fmt / lwip-send chain; 16 KiB overflowed on real inbound
+        // connections. The desktop default (MiB thread stacks) had hidden this.
+        const thread = os.Thread.spawn(.{ .stack_size = os.conn_stack_size }, handleConnection, .{args}) catch |err| {
             state.logger.warn("Thread.spawn failed: {}", .{err});
             conn.stream.close();
             continue;

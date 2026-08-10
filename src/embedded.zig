@@ -118,6 +118,16 @@ fn casterMain() void {
         std.log.err("caster: config parse failed: {}", .{err});
         return;
     };
+    // Embedded: bound concurrent connections. Each handler runs on a 32 KiB
+    // FreeRTOS task (internal RAM only); the desktop default of 100 would be
+    // ~3 MiB of task stacks — impossible here. A base station serves a handful
+    // of rovers; over the cap, accept() spawn fails and drops the connection
+    // gracefully rather than OOM'ing.
+    g_config.max_clients = 8;
+    // Open RTK base: any rover may pull /MOSAIC while a source is pushing. The
+    // mount is created dynamically by the feeder (no config line), so without
+    // this it falls under default_mount_access = .deny and every GET gets 401.
+    g_config.default_mount_access = .open;
     g_state = server.ServerState.init(allocator, &g_config, "");
 
     // Feeder task: USB sink → /MOSAIC source.
