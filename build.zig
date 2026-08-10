@@ -40,6 +40,14 @@ pub fn build(b: *std.Build) void {
         "vrs_inject_antenna",
         b.option(bool, "vrs-inject-antenna", "Inject RTCM3 Type 1008 antenna descriptor for VRS rovers") orelse false,
     );
+    // I/O backend 選択 (src/io.zig)。posix=host/Linux/クラウド、lwip=ESP-IDF(Tab5)。
+    // lwip backend は未実装 (io_lwip.zig TODO)。host ビルドは posix のまま。
+    const IoBackend = enum { posix, lwip };
+    options_step.addOption(
+        IoBackend,
+        "io_backend",
+        b.option(IoBackend, "io-backend", "I/O backend: posix (host/cloud) or lwip (ESP-IDF/Tab5)") orelse .posix,
+    );
     const options_mod = options_step.createModule();
 
     // ── "ntripcaster" library module (src/ tree exposed for tests) ──────────
@@ -138,5 +146,48 @@ pub fn build(b: *std.Build) void {
 
     b.step("test-integration", "Run integration tests (TCP)").dependOn(
         &b.addRunArtifact(int_tests).step,
+    );
+
+    // ── Embedded static library (M2: ESP-IDF/Tab5 link target) ─────────────
+    // ESP-IDF の CMake component がこの成果物 (libntripcaster.a) を firmware に
+    // リンクする。cross-compile の健全性検証用にも使う:
+    //   zig build caster-lib -Dio-backend=lwip \
+    //     -Dtarget=riscv32-freestanding -Dcpu=generic_rv32+m+a+f+c
+    const caster_mod = b.createModule(.{
+        .root_source_file = b.path("src/embedded.zig"),
+        .target = target,
+        .optimize = optimize,
+        // ESP-IDF provides newlib (malloc/free → PSRAM) and pthread. Zig
+        // needs libc "declared" to permit the extern "c" allocator decls;
+        // the actual symbols are resolved by the IDF final link. On the host
+        // this links the system libc for real (so the lib is host-buildable).
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "build_options", .module = options_mod },
+        },
+    });
+    // ESP-IDF component ビルドが FreeRTOS/lwip の include dir 群を
+    // `NTRIPCASTER_IDF_INCLUDES` (`;` 区切り) で渡してくる。io_lwip.zig /
+    // os_lwip.zig の @cImport がこれらを解決する。host ビルド (env 未設定)
+    // では素通り。
+    if (std.process.getEnvVarOwned(b.allocator, "NTRIPCASTER_IDF_INCLUDES")) |inc| {
+        var it = std.mem.tokenizeScalar(u8, inc, ';');
+        while (it.next()) |dir| {
+            if (dir.len == 0) continue;
+            caster_mod.addSystemIncludePath(.{ .cwd_relative = dir });
+        }
+    } else |_| {}
+
+    const caster_lib = b.addLibrary(.{
+        .name = "ntripcaster",
+        .linkage = .static,
+        .root_module = caster_mod,
+    });
+    // Bundle compiler-rt into the archive: std.fmt's float formatter pulls in
+    // 128-bit division (__udivti3) which the riscv32 libgcc esp-idf links does
+    // not provide. Zig's compiler-rt has it.
+    caster_lib.bundle_compiler_rt = true;
+    b.step("caster-lib", "Build embedded static library (ESP-IDF link target)").dependOn(
+        &b.addInstallArtifact(caster_lib, .{}).step,
     );
 }

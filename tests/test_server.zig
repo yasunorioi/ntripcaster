@@ -35,7 +35,7 @@ fn startServer(state: *server_mod.ServerState) !std.Thread {
 
 /// バインドされた実際のポート番号を返す（started_event 後に呼ぶこと）。
 fn boundPort(state: *const server_mod.ServerState) u16 {
-    return state.listen_address.in.getPort();
+    return state.listen_address.getPort();
 }
 
 /// 接続して request を送り、レスポンスの先頭を resp_buf に読む。
