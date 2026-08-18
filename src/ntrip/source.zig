@@ -13,10 +13,22 @@ const rtcm3 = @import("rtcm3.zig");
 const sockopt = @import("../net/sockopt.zig");
 const sourcetable = @import("sourcetable.zig");
 
-/// 既存 mount との衝突時、何ミリ秒以上 idle なら旧 source を強制 evict するか。
-/// 30 秒は RTCM 基準局の典型送出間隔 (1Hz) より十分大きく、かつ caster 側
-/// 回線瞬断からの reconnect を待つには短い、を狙った値。
-pub const STALE_SOURCE_IDLE_MS: i64 = 30_000;
+/// 認証済みの新 SOURCE が既存 mount と衝突したとき、旧 source が何ミリ秒
+/// 以上 idle なら「takeover」として強制 evict し、mount を新接続へ即座に
+/// 明け渡すか、の閾値。
+///
+/// この値の意味 (1 mount = 1 基準局 の設計前提):
+///   * reboot / WiFi 瞬断で残った half-open zombie は、箱が落ちた瞬間から
+///     RTCM が止まる。再接続時には idle が既に「reboot 所要 + 再接続時間」
+///     ＝この閾値を大きく超えているので、即 takeover され reclaim 遅延は
+///     ほぼゼロになる (旧 v1 の "Mount already in use" backoff ~30-45s を解消)。
+///   * 逆に「別の生きた基準局が同じ creds で誤設定され両方 push」する場合、
+///     現役側は MSM7 1Hz で idle < 1s を保つため evict されず、新参が弾かれる。
+///     互いを蹴り合う無限フラップを防ぐ anti-flap マージンでもある。
+///
+/// よって値は「RTCM 送出間隔 (obs 1Hz) より十分大きく、reboot/reconnect
+/// 時間より十分小さい」3 秒。30 秒では reboot reconnect が長く待たされた。
+pub const SOURCE_TAKEOVER_IDLE_MS: i64 = 3_000;
 
 /// マウントポイントに接続中のソース（基準局）。
 pub const Source = struct {
@@ -168,13 +180,16 @@ pub fn handleSource(
     };
 
     // 5. マウント登録
-    //   先に旧 source の stale 判定 + 強制 evict。caster 側回線瞬断後の
-    //   reconnect で「half-open の旧接続が mount 枠を握ったまま」となるのを
-    //   防ぐ。新 SOURCE は即座にこの mount を取り返せる。
-    if (state.evictStaleSource(login.mount, STALE_SOURCE_IDLE_MS)) {
+    //   先に旧 source の takeover 判定 + 強制 evict。認証を通過した新 SOURCE は
+    //   この mount の正当な基準局なので、reboot/WiFi 瞬断で残った half-open の
+    //   旧接続 (idle > SOURCE_TAKEOVER_IDLE_MS) を即 evict して mount を取り返す。
+    //   現役で streaming 中の source (idle 小) は evict されず、新参が弾かれる
+    //   ＝別基準局の誤設定による無限フラップは起きない。
+    if (state.evictStaleSource(login.mount, SOURCE_TAKEOVER_IDLE_MS)) {
         state.logger.warn(
-            "source {s}: evicted stale connection (idle > {d}ms), accepting new",
-            .{ login.mount, STALE_SOURCE_IDLE_MS },
+            "source {s}: authenticated reconnect — evicted previous connection " ++
+                "(idle > {d}ms), taking over mount",
+            .{ login.mount, SOURCE_TAKEOVER_IDLE_MS },
         );
     }
     state.registerSource(src) catch {

@@ -625,3 +625,90 @@ test "v1 regression: GET / sourcetable still returns SOURCETABLE 200 OK" {
     );
     try std.testing.expect(std.mem.startsWith(u8, buf[0..n], "SOURCETABLE 200 OK\r\n"));
 }
+
+// ── SOURCE takeover (mount reclaim) ──────────────────────────────────────────
+// reboot/WiFi 瞬断で残った half-open は、その fd から RTCM が止まった時点で
+// caster 側の source idle が伸び続ける。認証済みの再接続は正当な基準局なので、
+// idle が SOURCE_TAKEOVER_IDLE_MS を超えていれば旧接続を即 evict して mount を
+// 取り返せる（"Mount already in use" backoff ~30-45s の解消）。実 TCP で確認。
+
+const TAKEOVER_MS = ntripcaster.ntrip.source.SOURCE_TAKEOVER_IDLE_MS;
+
+test "SOURCE takeover: authenticated reconnect evicts an idle source, reclaims mount" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    // 旧接続: SOURCE で mount を握るが以後データを送らない（half-open 相当）。
+    var old = try std.net.tcpConnectToAddress(addr);
+    defer old.close();
+    try old.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok1: [8]u8 = undefined;
+    const ok1_n = try old.read(&ok1);
+    try std.testing.expectEqualStrings("OK\r\n", ok1[0..ok1_n]);
+
+    // idle が takeover grace を超えるまで待つ（旧接続はデータを送らないので
+    // last_data_at_ms は登録時刻のまま伸び続ける）。
+    std.Thread.sleep(@as(u64, @intCast(TAKEOVER_MS + 500)) * std.time.ns_per_ms);
+
+    // 新接続: 同 mount へ再接続 → takeover で即 OK が返るはず。
+    var new = try std.net.tcpConnectToAddress(addr);
+    defer new.close();
+    try new.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok2: [16]u8 = undefined;
+    const ok2_n = try new.read(&ok2);
+    try std.testing.expectEqualStrings("OK\r\n", ok2[0..ok2_n]);
+
+    // 旧接続の socket は caster に shutdown され、read は EOF(0) で返るはず。
+    var drain: [64]u8 = undefined;
+    const old_n = old.read(&drain) catch 0; // reset ならエラー → 同義で evicted
+    try std.testing.expectEqual(@as(usize, 0), old_n);
+}
+
+test "SOURCE takeover: a live source is NOT evicted (anti-flap)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var cfg = try makeTestConfig(arena.allocator());
+    defer cfg.deinit();
+
+    var state = server_mod.ServerState.init(arena.allocator(), &cfg, "conf");
+    state.logger.stderr = false;
+    state.config.port = 0;
+    defer state.deinit();
+
+    const t = try startServer(&state);
+    defer { state.shutdown(); t.join(); }
+
+    const port = boundPort(&state);
+    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+
+    // 現役接続: 直前に登録された（idle ≈ 0 << grace）。
+    var live = try std.net.tcpConnectToAddress(addr);
+    defer live.close();
+    try live.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
+    var ok1: [8]u8 = undefined;
+    const ok1_n = try live.read(&ok1);
+    try std.testing.expectEqualStrings("OK\r\n", ok1[0..ok1_n]);
+
+    // grace 内に別 SOURCE が来ても現役は evict されず、新参が弾かれる。
+    var buf: [64]u8 = undefined;
+    const n = try reqResp(
+        port,
+        "SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n",
+        &buf,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "ERROR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf[0..n], "in use") != null);
+}
