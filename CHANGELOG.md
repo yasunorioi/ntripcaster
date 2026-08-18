@@ -20,10 +20,17 @@ All notable changes to this project are documented here.
   切替で発生する TCP 詰まり / half-open を約 75 秒で kernel 検出。
   `src/net/sockopt.zig` に共通化。
 - **Source の stale 接続 evict**: 同名 mount への新 SOURCE 接続が来たとき、
-  既存 source の `last_data_at_ms` が 30 秒以上前なら旧接続を即 shutdown
+  既存 source の `last_data_at_ms` が閾値以上前なら旧接続を即 shutdown
   + unregister して新規受け入れ。caster 側回線瞬断後の reconnect が
   「Mount already in use」で蹴られる現象を 0 秒で解消。`Source.stream_handle`
   と `ServerState.evictStaleSource` / `unregisterSourceIfSame` を追加。
+- **Takeover の閾値を 30s → 3s に短縮** (`STALE_SOURCE_IDLE_MS` →
+  `SOURCE_TAKEOVER_IDLE_MS`): 認証を通過した再接続は正当な基準局 (1 mount
+  1 base) なので、reboot/WiFi 瞬断で残った zombie を待たずに取り返せるよう
+  grace を短縮。reboot/reconnect 時間は必ずこの grace を超えるため実質即
+  reclaim。一方 1Hz streaming 中の現役 source は idle が grace 未満で
+  evict されないので、2 基準局を同 mount に誤設定しても無限フラップしない。
+  `source.zig` に境界を固定する回帰テストを追加。
 - **client disconnect 理由ログ**: clientLoop の全終了経路 (writeAll /
   writeChunked エラー、BufferOverrun、src.active=false) をそれぞれ
   `WARN` / `INFO` で残し、`src.overrun_disconnects` カウンタも追加。

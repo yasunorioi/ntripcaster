@@ -139,7 +139,7 @@ class node_tests,node_interop,node_demo toneRose
 - Connection limit enforcement (max_clients / max_clients_per_source / max_sources)
 - Sourcetable fully auto-generated: CAS / NET 行は設定ファイルから組み立て、STR 行は live source から動的生成（手書き `sourcetable.dat` 不要）
 - RTCM 3 frame analysis (0xD3 sync, CRC-24Q, message type detection, 1005/1006 antenna-ref-point lat/lon 抽出)
-- **Harsh-conditions hardening** (農機 / LTE / Starlink 想定): client + source 両側に `SO_KEEPALIVE` + `SO_SNDTIMEO` を適用、source の half-open 接続は約 75 秒で kernel 検出。同名 mount への新 SOURCE 接続が来たとき旧接続が 30 秒 idle なら即 evict して reconnect を 0 秒で通す
+- **Harsh-conditions hardening** (農機 / LTE / Starlink 想定): client + source 両側に `SO_KEEPALIVE` + `SO_SNDTIMEO` を適用、source の half-open 接続は約 75 秒で kernel 検出。同名 mount への新 SOURCE/POST 接続が来て認証を通過したら **takeover**: 旧接続が `SOURCE_TAKEOVER_IDLE_MS` (3 秒) 以上 idle なら即 evict し reconnect を 0 秒で通す。reboot/瞬断の zombie は必ずこの grace を超えるので即 reclaim、逆に 1Hz で streaming 中の現役 source は idle が grace 未満で evict されず、2 基準局を同 mount に誤設定しても無限フラップしない
 - **FKP (Flächenkorrekturparameter) live service** — 3+ NTRIP 上流に接続し、主上流の生 RTCM3 + 定期注入 Type 59 を仮想 mountpoint として配信 (Network RTK)
 - **Admin UI + JSON API** (`/api/v1/{status,sources,clients,events}`) with SSE live updates and embedded vanilla-JS dashboard + Leaflet/OSM 基準局マップ + source-offline 赤バナー
 - Per-connection telemetry: peer address, bytes_in/out, started_at, last_data_at, per-source RTCM3 message-type counts, BufferOverrun 切断回数
