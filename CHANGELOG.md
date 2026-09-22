@@ -6,6 +6,29 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Zig 0.16 への移行 (std.Io interface)
+
+- **ビルド要件を Zig 0.15.x → 0.16.x に変更**。0.16 で `std.Thread.{Mutex,
+  RwLock,ResetEvent}` / `std.net` / `std.posix` の socket syscall ラッパ /
+  `std.fs.File` / `std.time.*Timestamp` / `std.process.argsAlloc` /
+  `std.io.fixedBufferStream` が撤去され、同期・ネットワーク I/O が新 `std.Io`
+  interface (io ハンドル必須) に統一されたことへの追随。
+- **io/os の 2 seam に差分を封じ込め、ハンドラ signature は不変**:
+  - `src/os.zig`: グローバル `std.Io.Threaded` シングルトン経由で `os.Mutex`/
+    `os.RwLock`/`sleep`/timestamp を供給 (既存 `.lock()/.unlock()` 呼び出しは全
+    call site 無改変)。`std.Io.async` 不使用のため `.failing` allocator で init。
+    lwip backend では comptime 分岐で `std.Io.Threaded` を一切参照しない。
+  - `src/io.zig`: posix backend を生 fd + io vtable (`netWrite`/`netAccept`/
+    `netListenIp`/`netClose`/`netShutdown`) に再実装 (`std.net` 非依存)。`read`
+    は残存する `std.posix.read`、bind 後の実ポートは `getsockname` (Linux は raw
+    syscall / 他 OS は libc)、peer address は `getpeername` で取得。
+  - `src/main.zig`: `main(init: std.process.Init.Minimal)` で引数受領、config
+    読みは `std.Io.Dir.cwd().readFileAlloc`、`os.initRuntime()` を先頭で呼ぶ。
+  - `src/log.zig`: ログファイルを `std.Io.File` + `writeStreamingAll` へ。
+- **検証**: `zig build test` 240/240 pass、native 実起動でソーステーブル配信を
+  確認、`aarch64-linux-musl` / `x86_64-macos` クロスビルド成功。
+- 既知の制約: posix Address は IPv4 listen のみ (base kit と同方針)。
+
 ### Production hardening (100+ concurrent client 向け)
 
 - **RingBuffer Mutex → RwLock**: writer (source.writeChunk) は exclusive、

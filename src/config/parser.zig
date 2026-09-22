@@ -234,7 +234,7 @@ fn parseFkpSource(
     // 最初のスペースで addr_part と opt_auth に分割
     const sp = std.mem.indexOfAny(u8, value, " \t");
     const addr_part = if (sp) |s| value[0..s] else value;
-    const opt_auth = if (sp) |s| std.mem.trimLeft(u8, value[s..], " \t") else "";
+    const opt_auth = if (sp) |s| std.mem.trimStart(u8, value[s..], " \t") else "";
 
     // addr_part を "/" で分割 → host_port / mount
     const slash = std.mem.indexOfScalar(u8, addr_part, '/') orelse
@@ -302,7 +302,7 @@ pub fn parse(allocator: std.mem.Allocator, content: []const u8) ParseError!Confi
         // キーバリュー行: 最初のスペース/タブで分割
         const sep_pos = std.mem.indexOfAny(u8, line, " \t") orelse continue;
         const key = line[0..sep_pos];
-        const value = std.mem.trimLeft(u8, line[sep_pos..], " \t");
+        const value = std.mem.trimStart(u8, line[sep_pos..], " \t");
         if (value.len == 0) continue;
 
         if (std.mem.eql(u8, key, "port")) {

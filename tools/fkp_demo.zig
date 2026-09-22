@@ -18,6 +18,8 @@ const msm7 = ntripcaster.fkp.msm7;
 const engine = ntripcaster.fkp.engine;
 const type59 = ntripcaster.fkp.type59;
 const rtcm3 = ntripcaster.ntrip.rtcm3;
+const io = ntripcaster.io;
+const os = ntripcaster.os;
 
 /// デモ用3局設定（環境に合わせて書き換え）
 const STATIONS = [3]struct {
@@ -31,7 +33,7 @@ const STATIONS = [3]struct {
 };
 
 /// NTRIP GET リクエスト送信
-fn sendNtripGet(stream: std.net.Stream, mount: []const u8, host: []const u8, port: u16) !void {
+fn sendNtripGet(stream: io.Stream, mount: []const u8, host: []const u8, port: u16) !void {
     // Basic認証: user:password 形式
     const auth_str = "user@example.com:pass";
     var auth_b64: [64]u8 = undefined;
@@ -54,7 +56,7 @@ fn sendNtripGet(stream: std.net.Stream, mount: []const u8, host: []const u8, por
 }
 
 /// NTRIP ICY 200 OK レスポンスを受信して確認する
-fn waitIcy(stream: std.net.Stream) !void {
+fn waitIcy(stream: io.Stream) !void {
     var buf: [256]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
@@ -76,7 +78,7 @@ const CollectResult = struct {
 
 fn collectStation(
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    stream: io.Stream,
     timeout_ms: u64,
 ) !CollectResult {
     var buf: [8192]u8 = undefined;
@@ -86,9 +88,9 @@ fn collectStation(
     var coord: ?msm7.StationCoord = null;
     var all_obs = std.ArrayList(msm7.PhaseObs).empty;
 
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    const deadline = os.milliTimestamp() + @as(i64, @intCast(timeout_ms));
 
-    while (std.time.milliTimestamp() < deadline) {
+    while (os.milliTimestamp() < deadline) {
         const n = stream.read(&buf) catch break;
         if (n == 0) break;
 
@@ -161,7 +163,7 @@ const ThreadArg = struct {
 };
 
 fn stationThread(arg: *ThreadArg) void {
-    const stream = std.net.tcpConnectToHost(arg.allocator, arg.host, arg.port) catch {
+    const stream = io.tcpConnectToHost(arg.allocator, arg.host, arg.port) catch {
         arg.err = true;
         return;
     };
@@ -185,7 +187,7 @@ fn stationThread(arg: *ThreadArg) void {
 fn log(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    std.fs.File.stderr().writeAll(msg) catch {};
+    os.consoleWrite(msg);
 }
 
 pub fn main() !void {
@@ -267,10 +269,10 @@ pub fn main() !void {
     }
 
     // Type 59 エンコード → stdout にバイナリ出力
-    const tow_ms: u32 = @truncate(@as(u64, @intCast(std.time.timestamp())) % (7 * 24 * 3600) * 1000);
+    const tow_ms: u32 = @truncate(@as(u64, @intCast(os.timestamp())) % (7 * 24 * 3600) * 1000);
     const frame = try type59.encodeType59(allocator, stations[0].coord.ref_station_id, tow_ms, fkp_params);
     defer allocator.free(frame);
 
-    std.fs.File.stdout().writeAll(frame) catch {};
+    std.Io.File.stdout().writeStreamingAll(os.rt(), frame) catch {};
     log("Type59 フレーム出力: {d} bytes\n", .{frame.len});
 }

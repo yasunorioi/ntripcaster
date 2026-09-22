@@ -4,6 +4,7 @@
 pub const config = @import("config/parser.zig");
 pub const auth = @import("auth/basic.zig");
 pub const io = @import("io.zig");
+pub const os = @import("os.zig");
 pub const log = @import("log.zig");
 pub const relay = @import("relay/engine.zig");
 pub const server = @import("server.zig");

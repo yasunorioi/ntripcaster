@@ -125,7 +125,7 @@ fn parseSourceLoginV1(header: []const u8) ?SourceLogin {
 
     const space = std.mem.indexOfScalar(u8, rest, ' ') orelse return null;
     const password = rest[0..space];
-    const mount = std.mem.trimLeft(u8, rest[space + 1 ..], " ");
+    const mount = std.mem.trimStart(u8, rest[space + 1 ..], " ");
     if (mount.len == 0 or mount[0] != '/') return null;
 
     return .{

@@ -154,7 +154,7 @@ test "admin: AdminState compiles and exposes shutdown" {
         .port = 0,
         .user = "",
         .password = "",
-        .server_started_at_ms = std.time.milliTimestamp(),
+        .server_started_at_ms = ntripcaster.os.milliTimestamp(),
         .alloc = alloc,
     };
     // listener が無い状態で shutdown() してもクラッシュしないこと

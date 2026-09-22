@@ -24,7 +24,14 @@ const usage =
     \\
 ;
 
-pub fn main() !void {
+// 0.16: main は引数/環境を受け取る形に変わった (グローバル argv は撤去)。
+// args だけ要るので Init.Minimal を取る (io/gpa は自前で用意する)。
+pub fn main(init: std.process.Init.Minimal) !void {
+    // ── posix runtime (std.Io) 初期化 ───────────────────────────────────────
+    // Zig 0.16: Mutex/RwLock/sleep が std.Io 経由になったため、スレッド生成前の
+    // 最初にグローバル io シングルトンを立てる (詳細は os.zig)。
+    os.initRuntime();
+
     // ── アロケータ初期化 ────────────────────────────────────────────────────
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -35,8 +42,8 @@ pub fn main() !void {
     defer config_arena.deinit();
 
     // ── CLI 引数解析 ────────────────────────────────────────────────────────
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // 0.16: argsAlloc は撤去。init.args を slice 化して従来通り index 参照する。
+    const args = try init.args.toSlice(config_arena.allocator());
 
     var config_path: []const u8 = "conf/ntripcaster.conf";
 
@@ -60,10 +67,12 @@ pub fn main() !void {
     }
 
     // ── 設定ファイル読み込み ────────────────────────────────────────────────
-    const file_content = std.fs.cwd().readFileAlloc(
-        config_arena.allocator(),
+    // 0.16: std.fs.cwd() は撤去。std.Io.Dir.cwd() + io ハンドル経由で読む。
+    const file_content = std.Io.Dir.cwd().readFileAlloc(
+        os.rt(),
         config_path,
-        1024 * 1024,
+        config_arena.allocator(),
+        .limited(1024 * 1024),
     ) catch |err| {
         std.debug.print("Error: cannot read config file '{s}': {}\n", .{ config_path, err });
         std.process.exit(1);

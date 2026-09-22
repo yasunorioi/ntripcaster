@@ -149,8 +149,8 @@ class node_tests,node_interop,node_demo toneRose
 
 ## Build
 
-Requires **Zig 0.15.x** (tested with 0.15.2). `build.zig` 先頭で 0.16+ は
-`@compileError` で弾きます。理由は下記「Zig 0.16+ について」を参照。
+Requires **Zig 0.16.x** (tested with 0.16.0). `build.zig` 先頭で 0.16 以外は
+`@compileError` で弾きます。0.15→0.16 移行の詳細は下記「Zig 0.16 への移行」を参照。
 
 ```bash
 # ネイティブビルド
@@ -163,29 +163,46 @@ zig build test
 zig build -Doptimize=ReleaseSafe
 ```
 
-### Zig 0.16+ について
+### Zig 0.16 への移行
 
-Zig 0.16 で `std.Thread.Mutex` → `std.Io.Mutex`、`std.net` → `std.Io.net`
-など同期/ネットワーク API が新 `std.Io` interface 経由に統一されたため、
-本プロジェクトの ServerState / Source / Relay / FKP runtime に `*std.Io`
-を貫通させる大規模リファクタが必要になります。0.17 でも同じ設計が続く
-ため (release notes 確認済み)、当面は 0.15.x で運用します。
+Zig 0.16 で標準ライブラリの I/O 周りが `std.Io` interface に全面刷新された:
 
-#### snap で 0.16 が入ってしまった場合 (Debian/Ubuntu)
+- `std.Thread.{Mutex,RwLock,ResetEvent}` / `nanosleep` 撤去 → 同期・sleep は
+  `std.Io`(io ハンドル必須)
+- `std.net` 撤去 → `std.Io.net`(接続/listen/write は io vtable 経由)
+- `std.posix` の socket syscall ラッパ (`write`/`socket`/`bind`/`listen`/
+  `accept`/`connect`/`close`/`shutdown`) 撤去。`read`/`setsockopt`/`getpeername`
+  等は残存
+- `std.fs.File` / `std.fs.cwd` / `std.time.*Timestamp` / `std.process.argsAlloc` /
+  `std.io.fixedBufferStream` も刷新、`main` は引数を受け取る形に変更
 
-snap zig は beta チャネルのみで 0.15.x が降りてこないので、公式 tarball
-への切り替えを推奨:
+本 caster は io/os の 2 seam (`src/io.zig` / `src/os.zig`) にこの差分を閉じ込めて
+対応している。ハンドラ全段に `io` を貫通させる代わりに:
+
+- **`src/os.zig`**: グローバル `std.Io.Threaded` シングルトンを持ち、`os.Mutex`/
+  `os.RwLock` のラッパが内部で io を供給する。既存の `.lock()/.unlock()` 呼び出しは
+  全 call site 無改変。`std.Io.async` は使わないので `.failing` allocator で init。
+- **`src/io.zig`**: posix backend は生 fd に対し io vtable
+  (`netWrite`/`netAccept`/`netListenIp`/`netClose`/…) を直に呼ぶ。`read` は残存する
+  `std.posix.read`、bind 後の実ポートは `getsockname` (OS 別) で取得。
+
+これにより Server / Source / Relay / FKP runtime の signature は一切変えずに 0.16 へ
+移行できた。
+
+#### Zig 0.16 のインストール (Debian/Ubuntu)
+
+snap zig は 0.16 相当のみで版固定できないため、公式 tarball を推奨:
 
 ```bash
-sudo snap remove zig
+sudo snap remove zig 2>/dev/null || true
 mkdir -p ~/.local/zig ~/.local/bin
 cd ~/.local/zig
-wget https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
-tar xf zig-x86_64-linux-0.15.2.tar.xz
-ln -sf ~/.local/zig/zig-x86_64-linux-0.15.2/zig ~/.local/bin/zig
+wget https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+tar xf zig-x86_64-linux-0.16.0.tar.xz
+ln -sf ~/.local/zig/zig-x86_64-linux-0.16.0/zig ~/.local/bin/zig
 # PATH に ~/.local/bin が無ければ:
 echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc && source ~/.bashrc
-zig version    # → 0.15.2
+zig version    # → 0.16.0
 ```
 
 ### クロスコンパイル

@@ -1,9 +1,12 @@
 // build.zig — NtripCaster Zig rewrite
-// Zig 0.15.x ONLY  |  zero external dependencies
+// Zig 0.16.x ONLY  |  zero external dependencies
 //
-// 0.16+ requires migrating Mutex / net to the new std.Io interface
-// (entire codebase needs an *Io runtime threaded through Server / Source
-// / Relay / FKP). Not yet done. Pin to 0.15.x for now.
+// 0.16 で std.Thread.Mutex/RwLock/ResetEvent と std.net が撤去され、同期/
+// ネットワークは新 std.Io interface (io ハンドル必須) に統一された。本 caster
+// は io/os の 2 seam (src/os.zig / src/io.zig) にその差分を閉じ込めて対応する:
+//   - os.zig: グローバル std.Io.Threaded シングルトン経由で Mutex/RwLock/sleep
+//   - io.zig: posix backend を raw std.posix syscall で再実装 (std.net 非依存)
+// ハンドラ側 (Server / Source / Relay / FKP) の signature は不変。
 //
 // Build commands:
 //   zig build                                        # host target
@@ -15,15 +18,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Hard-fail on 0.16+ rather than producing 200 lines of API errors.
+// Hard-fail on non-0.16 rather than producing 200 lines of API errors.
 comptime {
     const v = builtin.zig_version;
-    if (v.major != 0 or v.minor != 15) {
+    if (v.major != 0 or v.minor != 16) {
         @compileError(std.fmt.comptimePrint(
-            "ntripcaster currently requires Zig 0.15.x (found {d}.{d}.{d}). " ++
-                "0.16+ port is blocked on the std.Io interface migration " ++
-                "(std.Thread.Mutex → std.Io.Mutex, std.net → std.Io.net). " ++
-                "Install Zig 0.15.2 from https://ziglang.org/download/0.15.2/",
+            "ntripcaster currently requires Zig 0.16.x (found {d}.{d}.{d}). " ++
+                "0.15 以前は std.Io interface 以前の API で本ツリーとは非互換 " ++
+                "(std.Io.Mutex / std.Io.net が無い)。" ++
+                "Install Zig 0.16.0 from https://ziglang.org/download/0.16.0/",
             .{ v.major, v.minor, v.patch },
         ));
     }
@@ -170,13 +173,15 @@ pub fn build(b: *std.Build) void {
     // `NTRIPCASTER_IDF_INCLUDES` (`;` 区切り) で渡してくる。io_lwip.zig /
     // os_lwip.zig の @cImport がこれらを解決する。host ビルド (env 未設定)
     // では素通り。
-    if (std.process.getEnvVarOwned(b.allocator, "NTRIPCASTER_IDF_INCLUDES")) |inc| {
+    // 0.16: std.process.getEnvVarOwned は撤去。build script は b.graph.environ_map
+    // (パース済み EnvMap) から読む。
+    if (b.graph.environ_map.get("NTRIPCASTER_IDF_INCLUDES")) |inc| {
         var it = std.mem.tokenizeScalar(u8, inc, ';');
         while (it.next()) |dir| {
             if (dir.len == 0) continue;
             caster_mod.addSystemIncludePath(.{ .cwd_relative = dir });
         }
-    } else |_| {}
+    }
 
     const caster_lib = b.addLibrary(.{
         .name = "ntripcaster",

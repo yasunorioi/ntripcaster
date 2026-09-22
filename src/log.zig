@@ -11,7 +11,10 @@ pub const Level = enum { info, warn, err };
 /// タイムスタンプ付きログ出力器。
 /// `Logger{}` でスタックに確保してそのまま使える（mutex embedded）。
 pub const Logger = struct {
-    file: ?std.fs.File = null,
+    // 0.16 で std.fs.File / std.posix.open|write が撤去されたため、ログファイルは
+    // std.Io.File で保持し、書き込みは writeStreamingAll (io 経由) で行う。
+    // (現状 openFile は未配線 = logfile 設定はパースのみで呼び出し無し。)
+    file: ?std.Io.File = null,
     /// false にするとstderr出力を抑制する（テスト時に使用）。
     stderr: bool = true,
     mutex: os.Mutex = .{},
@@ -39,7 +42,7 @@ pub const Logger = struct {
         if (self.stderr) os.consoleWrite(line);
         // ファイルログは posix build のみ (lwip base kit にファイルシステム無し)。
         if (!os.use_lwip) {
-            if (self.file) |f| f.writeAll(line) catch {};
+            if (self.file) |f| f.writeStreamingAll(os.rt(), line) catch {};
         }
     }
 
@@ -59,9 +62,13 @@ pub const Logger = struct {
     /// (base kit にファイルシステム無し。将来 SD を積むならここを差し替え)。
     pub fn openFile(self: *Logger, path: []const u8) !void {
         if (!os.use_lwip) {
-            const f = try std.fs.cwd().createFile(path, .{ .truncate = false });
-            errdefer f.close();
-            try f.seekFromEnd(0);
+            const io = os.rt();
+            // truncate=false で既存を残し、末尾へ seek してから追記する。
+            const f = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+            errdefer f.close(io);
+            if (f.stat(io)) |st| {
+                io.vtable.fileSeekTo(io.userdata, f, st.size) catch {};
+            } else |_| {}
             self.mutex.lock();
             defer self.mutex.unlock();
             self.file = f;
@@ -76,7 +83,7 @@ pub const Logger = struct {
             self.mutex.lock();
             defer self.mutex.unlock();
             if (self.file) |f| {
-                f.close();
+                f.close(os.rt());
                 self.file = null;
             }
         }

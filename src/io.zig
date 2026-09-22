@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const os = @import("os.zig");
 
 /// true なら ESP-IDF/lwIP backend。
 pub const use_lwip = build_options.io_backend == .lwip;
@@ -38,28 +39,33 @@ pub const Handle = if (use_lwip) lwip.Handle else std.posix.fd_t;
 pub const Stream = struct {
     handle: Handle,
 
-    /// std.net.Server.accept() が返す std.net.Stream を io.Stream に包む。
-    /// posix backend 専用 (accept 境界でのみ使う)。
-    pub fn fromNet(s: std.net.Stream) Stream {
-        return .{ .handle = s.handle };
-    }
-
-    /// posix backend の委譲先。std.net.Stream は handle 1 フィールドのみなので
-    /// その場で再構築できる (net.zig:1902-1910 で確認)。
-    inline fn asNet(self: Stream) std.net.Stream {
-        return .{ .handle = self.handle };
+    /// 生 fd から Stream を作る (accept / connect 境界で使う)。
+    pub fn fromFd(fd: Handle) Stream {
+        return .{ .handle = fd };
     }
 
     // 戻り値の error set は backend 非依存にするため anyerror。ハンドラ側は
     // どこも catch/return するだけで error 種別を検査しないので実害なし。
+    //
+    // 0.16 で std.net と std.posix の socket syscall ラッパ (write/close/…) が
+    // 撤去されたため、posix backend は生 fd に対し std.Io の net vtable
+    // (netWrite/netClose/netShutdown) を直に呼ぶ。read だけは std.posix.read が
+    // 残存しているのでそれを使う (Reader interface を挟まず 1 read で済む)。
     pub fn read(self: Stream, buffer: []u8) anyerror!usize {
         if (use_lwip) return lwip.read(self.handle, buffer);
-        return self.asNet().read(buffer);
+        return std.posix.read(self.handle, buffer);
     }
 
     pub fn writeAll(self: Stream, bytes: []const u8) anyerror!void {
         if (use_lwip) return lwip.writeAll(self.handle, bytes);
-        return self.asNet().writeAll(bytes);
+        const io = os.rt();
+        var i: usize = 0;
+        while (i < bytes.len) {
+            const chunk = bytes[i..];
+            const n = try io.vtable.netWrite(io.userdata, self.handle, "", &.{chunk}, 1);
+            if (n == 0) return error.WriteFailed;
+            i += n;
+        }
     }
 
     pub fn close(self: Stream) void {
@@ -67,7 +73,8 @@ pub const Stream = struct {
             lwip.close(self.handle);
             return;
         }
-        self.asNet().close();
+        const io = os.rt();
+        io.vtable.netClose(io.userdata, &.{self.handle});
     }
 };
 
@@ -76,8 +83,24 @@ pub const Stream = struct {
 /// lwip の getaddrinfo/connect に置換する。
 pub fn tcpConnectToHost(alloc: std.mem.Allocator, name: []const u8, port: u16) !Stream {
     if (use_lwip) return Stream{ .handle = try lwip.tcpConnectToHost(alloc, name, port) };
-    const s = try std.net.tcpConnectToHost(alloc, name, port);
-    return Stream.fromNet(s);
+    // 0.16: std.net.tcpConnectToHost は撤去。std.Io.net で DNS 解決 + connect し、
+    // 生 fd だけ取り出して以降は raw std.posix で扱う (read/write を Reader/Writer
+    // interface に載せ替えない)。DNS 解決は io vtable 経由なのでグローバル io が要る。
+    // alloc は lwip backend の解決でのみ使う (posix は io vtable が内部処理)。
+    const io = os.rt();
+    const addr = try std.Io.net.IpAddress.resolve(io, name, port);
+    const stream = try addr.connect(io, .{ .mode = .stream });
+    return Stream.fromFd(stream.socket.handle);
+}
+
+/// 数値 IPv4 アドレスへ直接 connect (DNS 解決なし)。integration test の
+/// クライアント側接続で使う。lwip backend は非対応。
+pub fn tcpConnectToAddress(addr: Address) !Stream {
+    if (use_lwip) return error.Unsupported;
+    const io = os.rt();
+    const ip: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = addr.addr, .port = addr.port } };
+    const stream = try ip.connect(io, .{ .mode = .stream });
+    return Stream.fromFd(stream.socket.handle);
 }
 
 /// IP アドレス + port を持つ純粋な値型 (I/O はしない)。
@@ -89,32 +112,44 @@ pub fn tcpConnectToHost(alloc: std.mem.Allocator, name: []const u8, port: u16) !
 /// posix 枝) 専用なので lwip 表現には無い。
 pub const Address = if (use_lwip) LwipAddress else PosixAddress;
 
+/// posix backend の Address。0.16 で std.net.Address が撤去されたため、lwip 側と
+/// 同じ純粋な IPv4 値型に統一した (bind/accept は raw std.posix sockaddr_in を
+/// 直に組むので std.net.Address 表現は不要)。ハンドラ側の surface
+/// (initIp4/parseIp4/parseIp/getPort/format) は不変。
+/// 制約: IPv6 listen は非対応 (base kit は数値 IPv4 バインドのみ)。
 const PosixAddress = struct {
-    inner: std.net.Address,
-
-    pub fn fromNet(a: std.net.Address) PosixAddress {
-        return .{ .inner = a };
-    }
+    addr: [4]u8 = .{ 0, 0, 0, 0 },
+    port: u16 = 0,
 
     pub fn initIp4(addr: [4]u8, port: u16) PosixAddress {
-        return .{ .inner = std.net.Address.initIp4(addr, port) };
+        return .{ .addr = addr, .port = port };
     }
 
     pub fn parseIp4(name: []const u8, port: u16) !PosixAddress {
-        return .{ .inner = try std.net.Address.parseIp4(name, port) };
+        var out: [4]u8 = undefined;
+        var it = std.mem.splitScalar(u8, name, '.');
+        var i: usize = 0;
+        while (it.next()) |part| : (i += 1) {
+            if (i >= 4) return error.InvalidIPAddressFormat;
+            out[i] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidIPAddressFormat;
+        }
+        if (i != 4) return error.InvalidIPAddressFormat;
+        return .{ .addr = out, .port = port };
     }
 
     pub fn parseIp(name: []const u8, port: u16) !PosixAddress {
-        return .{ .inner = try std.net.Address.parseIp(name, port) };
+        return parseIp4(name, port);
     }
 
     pub fn getPort(self: PosixAddress) u16 {
-        return self.inner.getPort();
+        return self.port;
     }
 
     /// "{f}" フォーマット指定子から呼ばれる (admin/stats.zig の appendAddr)。
     pub fn format(self: PosixAddress, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try self.inner.format(w);
+        try w.print("{d}.{d}.{d}.{d}:{d}", .{
+            self.addr[0], self.addr[1], self.addr[2], self.addr[3], self.port,
+        });
     }
 };
 
@@ -158,23 +193,22 @@ const LwipAddress = struct {
     }
 };
 
-/// TCP リスナー。listen/accept は backend 固有。posix は std.net.Server を
-/// 内包し、lwip は lwip_socket/bind/listen で立てた fd を持つ。ハンドラ側
+/// TCP リスナー。listen/accept は backend 固有。0.16 で std.net.Server が撤去
+/// されたため posix も lwip と同じ「生 fd + バインドアドレス」構造 (PosixListener)
+/// に統一し、raw std.posix で socket/bind/listen/accept する。ハンドラ側
 /// (server.zig / admin/server.zig) はこの型だけを見る。
 pub const Listener = struct {
-    inner: if (use_lwip) LwipListener else std.net.Server,
+    inner: if (use_lwip) LwipListener else PosixListener,
 
     /// `host` (数値 IPv4 文字列) : `port` で listen する。SO_REUSEADDR 有効。
     pub fn bind(host: []const u8, port: u16) !Listener {
         if (use_lwip) return .{ .inner = try LwipListener.bind(host, port) };
-        const a = try std.net.Address.parseIp(host, port);
-        return .{ .inner = try a.listen(.{ .reuse_address = true }) };
+        return .{ .inner = try PosixListener.bind(host, port) };
     }
 
     /// 実際にバインドされたアドレス (started_event 通知後にログ用に読む)。
     pub fn listenAddress(self: *const Listener) Address {
-        if (use_lwip) return self.inner.address;
-        return Address.fromNet(self.inner.listen_address);
+        return self.inner.address;
     }
 
     /// 1 接続を受理。backend の生 stream/addr を io 型に包んで返す。
@@ -183,8 +217,7 @@ pub const Listener = struct {
             const a = try lwip.accept(self.inner.fd);
             return .{ .stream = .{ .handle = a.fd }, .address = Address.initIp4(a.ip, a.port) };
         }
-        const conn = try self.inner.accept();
-        return .{ .stream = Stream.fromNet(conn.stream), .address = Address.fromNet(conn.address) };
+        return self.inner.accept();
     }
 
     /// ブロック中の accept() を叩き起こす (SHUT_RDWR)。shutdown シーケンス用。
@@ -193,7 +226,8 @@ pub const Listener = struct {
             lwip.shutdownBoth(self.inner.fd);
             return;
         }
-        std.posix.shutdown(self.inner.stream.handle, .both) catch {};
+        const io = os.rt();
+        io.vtable.netShutdown(io.userdata, self.inner.server.socket.handle, .both) catch {};
     }
 
     pub fn deinit(self: *Listener) void {
@@ -201,7 +235,39 @@ pub const Listener = struct {
             lwip.close(self.inner.fd);
             return;
         }
-        self.inner.deinit();
+        self.inner.server.deinit(os.rt());
+    }
+};
+
+/// posix backend の listener 状態。std.Io.net.Server を内包し、バインドアドレスは
+/// getsockname を避け bind 時の host/port をそのまま保持する (lwip 側と同方針)。
+const PosixListener = struct {
+    server: std.Io.net.Server,
+    address: Address,
+
+    fn bind(host: []const u8, port: u16) !PosixListener {
+        const a = try Address.parseIp(host, port);
+        const io = os.rt();
+        const ip: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = a.addr, .port = port } };
+        const server = try ip.listen(io, .{ .reuse_address = true, .mode = .stream });
+        // port=0 (ephemeral) 指定時に OS が割り当てた実ポートを getsockname で拾う。
+        // 0.16 で std.posix.getsockname が撤去されたため OS 別に生 getsockname。
+        const bound = sockName(server.socket.handle) orelse a;
+        return .{ .server = server, .address = bound };
+    }
+
+    fn accept(self: *PosixListener) !Accepted {
+        const io = os.rt();
+        const stream = try self.server.accept(io);
+        const fd = stream.socket.handle;
+        // accept は peer address を返さないので getpeername (posix に残存) で取得。
+        var sa: std.posix.sockaddr.in = undefined;
+        var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+        var peer = Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+        if (std.posix.getpeername(fd, @ptrCast(&sa), &len)) |_| {
+            peer = Address.initIp4(@bitCast(sa.addr), std.mem.bigToNative(u16, sa.port));
+        } else |_| {}
+        return .{ .stream = Stream.fromFd(fd), .address = peer };
     }
 };
 
@@ -224,13 +290,27 @@ const LwipListener = struct {
     }
 };
 
+/// fd にバインドされたローカルアドレスを取得 (getsockname)。0.16 で
+/// std.posix.getsockname が撤去されたため、Linux は raw syscall、他 OS は libc。
+fn sockName(fd: Handle) ?Address {
+    var sa: std.posix.sockaddr.in = undefined;
+    var len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+    const ok = switch (builtin.os.tag) {
+        .linux => std.os.linux.getsockname(fd, @ptrCast(&sa), &len) == 0,
+        else => std.c.getsockname(fd, @ptrCast(&sa), &len) == 0,
+    };
+    if (!ok) return null;
+    return Address.initIp4(@bitCast(sa.addr), std.mem.bigToNative(u16, sa.port));
+}
+
 /// source fd の強制 shutdown (evictStaleSource が古い基準局を kill する用)。
 pub fn shutdownHandle(handle: Handle) void {
     if (use_lwip) {
         lwip.shutdownBoth(handle);
         return;
     }
-    std.posix.shutdown(handle, .both) catch {};
+    const io = os.rt();
+    io.vtable.netShutdown(io.userdata, handle, .both) catch {};
 }
 
 // ── socket options (net/sockopt.zig + server の keep-alive がここ経由) ────────

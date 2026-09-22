@@ -305,25 +305,25 @@ fn formatGga(buf: []u8, lat_deg: f64, lon_deg: f64) ?[]const u8 {
     const lon_min: f64 = (lon_abs - @as(f64, @floatFromInt(lon_deg_i))) * 60.0;
     const lon_ew: u8 = if (lon_deg >= 0) 'E' else 'W';
 
-    // チェックサム前まで組み立て
-    var fbs = std.io.fixedBufferStream(buf);
-    const w = fbs.writer();
+    // チェックサム前まで組み立て。0.16: std.io.fixedBufferStream は撤去され、
+    // 固定バッファ Writer は std.Io.Writer.fixed、整形は w.print に統一された。
+    var w = std.Io.Writer.fixed(buf);
 
     // GGA ペイロード ($ と *xx 以外を生成してチェックサム計算)
     const payload_start: usize = 1;  // '$' の後
     w.writeByte('$') catch return null;
-    std.fmt.format(w, "GPGGA,000000.00,{d:0>2}{d:07.4},{c},{d:0>3}{d:07.4},{c},1,08,0.9,0.0,M,46.9,M,,", .{
+    w.print("GPGGA,000000.00,{d:0>2}{d:07.4},{c},{d:0>3}{d:07.4},{c},1,08,0.9,0.0,M,46.9,M,,", .{
         lat_deg_i, lat_min, lat_ns, lon_deg_i, lon_min, lon_ew,
     }) catch return null;
 
-    const pos_before_star = fbs.pos;
+    const pos_before_star = w.end;
 
     // XOR チェックサム ($ と * の間)
     var cs: u8 = 0;
     for (buf[payload_start..pos_before_star]) |b| cs ^= b;
 
-    std.fmt.format(w, "*{X:0>2}\r\n", .{cs}) catch return null;
-    return buf[0..fbs.pos];
+    w.print("*{X:0>2}\r\n", .{cs}) catch return null;
+    return buf[0..w.end];
 }
 
 fn sendGet(self: *Upstream, stream: io.Stream) !void {

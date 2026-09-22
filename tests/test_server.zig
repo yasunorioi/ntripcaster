@@ -40,11 +40,11 @@ fn boundPort(state: *const server_mod.ServerState) u16 {
 
 /// 接続して request を送り、レスポンスの先頭を resp_buf に読む。
 fn reqResp(port: u16, request: []const u8, resp_buf: []u8) !usize {
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
-    var conn = try std.net.tcpConnectToAddress(addr);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
+    var conn = try ntripcaster.io.tcpConnectToAddress(addr);
     defer conn.close();
     try conn.writeAll(request);
-    std.Thread.sleep(60 * std.time.ns_per_ms);
+    ntripcaster.os.sleep(60 * std.time.ns_per_ms);
     return conn.read(resp_buf);
 }
 
@@ -140,8 +140,8 @@ test "SOURCE correct password returns OK" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
-    var src = try std.net.tcpConnectToAddress(addr);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
 
     try src.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
@@ -193,10 +193,10 @@ test "client wrong credentials returns 401" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // ソース接続
-    var src = try std.net.tcpConnectToAddress(addr);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
     try src.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok: [8]u8 = undefined;
@@ -229,10 +229,10 @@ test "source to client RTCM relay" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // ── ソース接続 ────────────────────────────────────────────────────────────
-    var src = try std.net.tcpConnectToAddress(addr);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
     try src.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok: [8]u8 = undefined;
@@ -240,7 +240,7 @@ test "source to client RTCM relay" {
     try std.testing.expectEqualStrings("OK\r\n", ok[0..ok_n]);
 
     // ── クライアント接続（user1:pass1 = dXNlcjE6cGFzczE=） ──────────────────
-    var cli = try std.net.tcpConnectToAddress(addr);
+    var cli = try ntripcaster.io.tcpConnectToAddress(addr);
     defer cli.close();
     try cli.writeAll(
         "GET /RELAY HTTP/1.0\r\n" ++
@@ -255,7 +255,7 @@ test "source to client RTCM relay" {
     // ── RTCMデータ送信 → 受信確認 ─────────────────────────────────────────────
     const rtcm: []const u8 = &.{ 0xD3, 0x00, 0x04, 0xAA, 0xBB, 0xCC, 0xDD };
     try src.writeAll(rtcm);
-    std.Thread.sleep(80 * std.time.ns_per_ms);
+    ntripcaster.os.sleep(80 * std.time.ns_per_ms);
 
     var data: [64]u8 = undefined;
     const data_n = try cli.read(&data);
@@ -279,20 +279,20 @@ test "open mount allows unauthenticated client" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // ソース接続
-    var src = try std.net.tcpConnectToAddress(addr);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
     try src.writeAll("SOURCE testpass /OPEN\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok: [8]u8 = undefined;
     _ = try src.read(&ok);
 
     // 認証なしクライアント
-    var cli = try std.net.tcpConnectToAddress(addr);
+    var cli = try ntripcaster.io.tcpConnectToAddress(addr);
     defer cli.close();
     try cli.writeAll("GET /OPEN HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n");
-    std.Thread.sleep(60 * std.time.ns_per_ms);
+    ntripcaster.os.sleep(60 * std.time.ns_per_ms);
 
     var resp: [32]u8 = undefined;
     const n = try cli.read(&resp);
@@ -317,10 +317,10 @@ test "connection rejected when max_clients exceeded" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // 1つ目: SOURCE接続で active_handlers = 1
-    var src = try std.net.tcpConnectToAddress(addr);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
     try src.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok: [8]u8 = undefined;
@@ -352,17 +352,17 @@ test "client rejected when max_clients_per_source exceeded" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // ソース接続
-    var src = try std.net.tcpConnectToAddress(addr);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
     try src.writeAll("SOURCE testpass /OPEN\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok: [8]u8 = undefined;
     _ = try src.read(&ok);
 
     // クライアント1: ICY 200 OK 受信 → client_count = 1 になる
-    var cli1 = try std.net.tcpConnectToAddress(addr);
+    var cli1 = try ntripcaster.io.tcpConnectToAddress(addr);
     defer cli1.close();
     try cli1.writeAll("GET /OPEN HTTP/1.0\r\nUser-Agent: NTRIP test/1.0\r\n\r\n");
     var icy: [32]u8 = undefined;
@@ -370,7 +370,7 @@ test "client rejected when max_clients_per_source exceeded" {
     try std.testing.expect(std.mem.startsWith(u8, icy[0..icy_n], "ICY 200 OK"));
 
     // client_count が 1 になるまで待つ
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    ntripcaster.os.sleep(50 * std.time.ns_per_ms);
 
     // クライアント2: max_clients_per_source(1)超過 → 503
     var buf: [64]u8 = undefined;
@@ -398,10 +398,10 @@ test "source rejected when max_sources exceeded" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // ソース1: OK
-    var src1 = try std.net.tcpConnectToAddress(addr);
+    var src1 = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src1.close();
     try src1.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok1: [8]u8 = undefined;
@@ -462,15 +462,15 @@ test "v2: GET stream returns HTTP/1.1 200 + chunked" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // 先にソースを接続
-    var src = try std.net.tcpConnectToAddress(addr);
+    var src = try ntripcaster.io.tcpConnectToAddress(addr);
     defer src.close();
     try src.writeAll("SOURCE testpass /OPEN\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok: [8]u8 = undefined;
     _ = try src.read(&ok);
-    std.Thread.sleep(30 * std.time.ns_per_ms);
+    ntripcaster.os.sleep(30 * std.time.ns_per_ms);
 
     // V2 クライアント接続
     var buf: [512]u8 = undefined;
@@ -649,10 +649,10 @@ test "SOURCE takeover: authenticated reconnect evicts an idle source, reclaims m
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // 旧接続: SOURCE で mount を握るが以後データを送らない（half-open 相当）。
-    var old = try std.net.tcpConnectToAddress(addr);
+    var old = try ntripcaster.io.tcpConnectToAddress(addr);
     defer old.close();
     try old.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok1: [8]u8 = undefined;
@@ -661,10 +661,10 @@ test "SOURCE takeover: authenticated reconnect evicts an idle source, reclaims m
 
     // idle が takeover grace を超えるまで待つ（旧接続はデータを送らないので
     // last_data_at_ms は登録時刻のまま伸び続ける）。
-    std.Thread.sleep(@as(u64, @intCast(TAKEOVER_MS + 500)) * std.time.ns_per_ms);
+    ntripcaster.os.sleep(@as(u64, @intCast(TAKEOVER_MS + 500)) * std.time.ns_per_ms);
 
     // 新接続: 同 mount へ再接続 → takeover で即 OK が返るはず。
-    var new = try std.net.tcpConnectToAddress(addr);
+    var new = try ntripcaster.io.tcpConnectToAddress(addr);
     defer new.close();
     try new.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok2: [16]u8 = undefined;
@@ -692,10 +692,10 @@ test "SOURCE takeover: a live source is NOT evicted (anti-flap)" {
     defer { state.shutdown(); t.join(); }
 
     const port = boundPort(&state);
-    const addr = try std.net.Address.parseIp4("127.0.0.1", port);
+    const addr = try ntripcaster.io.Address.parseIp4("127.0.0.1", port);
 
     // 現役接続: 直前に登録された（idle ≈ 0 << grace）。
-    var live = try std.net.tcpConnectToAddress(addr);
+    var live = try ntripcaster.io.tcpConnectToAddress(addr);
     defer live.close();
     try live.writeAll("SOURCE testpass /RELAY\r\nSource-Agent: NTRIP test/1.0\r\n\r\n");
     var ok1: [8]u8 = undefined;
