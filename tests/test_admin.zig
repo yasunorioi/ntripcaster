@@ -38,7 +38,7 @@ test "stats: writeStatusJson emits expected keys" {
     defer state.deinit();
 
     // listen_address はテストでは未設定なので適当な値を入れる
-    state.listen_address = try std.net.Address.parseIp4("127.0.0.1", 2101);
+    state.listen_address = try ntripcaster.io.Address.parseIp4("127.0.0.1", 2101);
 
     var out = std.ArrayList(u8).empty;
     defer out.deinit(alloc);
@@ -75,7 +75,7 @@ test "stats: writeSourcesJson station field is null when no 1005 received" {
     var state = server_mod.ServerState.init(alloc, &config, ".");
     defer state.deinit();
 
-    const peer = try std.net.Address.parseIp4("127.0.0.1", 1234);
+    const peer = try ntripcaster.io.Address.parseIp4("127.0.0.1", 1234);
     const src = try source_mod.Source.create(alloc, "/M1", peer);
     try state.registerSource(src);
     defer {
@@ -99,7 +99,7 @@ test "stats: writeSourcesJson exposes station lat/lon once 1005 seen" {
     var state = server_mod.ServerState.init(alloc, &config, ".");
     defer state.deinit();
 
-    const peer = try std.net.Address.parseIp4("127.0.0.1", 5678);
+    const peer = try ntripcaster.io.Address.parseIp4("127.0.0.1", 5678);
     const src = try source_mod.Source.create(alloc, "/SAP", peer);
     src.station = rtcm3.StationCoord{
         .ref_station_id = 7,

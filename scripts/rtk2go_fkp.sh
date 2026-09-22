@@ -18,7 +18,7 @@ echo ""
 # バイナリビルド確認
 if [[ ! -f "$DEMO" ]]; then
     echo "[BUILD] zig build ..."
-    /snap/bin/zig build 2>&1
+    zig build 2>&1
 fi
 
 echo "[INFO] 3局に接続中..."
@@ -37,5 +37,5 @@ else
     echo "[INFO] 接続失敗時はネットワーク確認またはDNS解決が必要"
     echo ""
     echo "=== ローカル機能テスト (zig build test) ==="
-    /snap/bin/zig build test --summary all 2>&1
+    zig build test --summary all 2>&1
 fi

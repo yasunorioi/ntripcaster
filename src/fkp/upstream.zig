@@ -10,6 +10,8 @@
 //! 切断時は指数バックオフで再接続する。`stop()` で終了。
 
 const std = @import("std");
+const io = @import("../io.zig");
+const os = @import("../os.zig");
 const msm7 = @import("msm7.zig");
 const ephemeris = @import("ephemeris.zig");
 const rtcm3 = @import("../ntrip/rtcm3.zig");
@@ -64,7 +66,7 @@ pub const Upstream = struct {
     logger: log_mod.Logger,
 
     /// 蓄積バッファ (lock で保護)
-    lock: std.Thread.Mutex,
+    lock: os.Mutex,
     coord: ?msm7.StationCoord,
     /// (prn, band) → 最新観測。新着で上書き、古いエントリは snapshot 時に除外。
     /// ArrayList ではなく Map にすることで「station A のみ更新が遅い」レースを回避。
@@ -87,7 +89,7 @@ pub const Upstream = struct {
     passthrough_fn: ?PassthroughFn,
 
     /// スレッド (start() で spawn、stop()/join() で終了)
-    thread: ?std.Thread,
+    thread: ?os.Thread,
 
     pub fn create(alloc: std.mem.Allocator, cfg: Config, logger: log_mod.Logger) !*Upstream {
         const u = try alloc.create(Upstream);
@@ -112,7 +114,7 @@ pub const Upstream = struct {
             .eph_store = ephemeris.EphemerisStore.init(alloc),
             .max_obs_age_ms = 10 * std.time.ms_per_s,
             .active = std.atomic.Value(bool).init(true),
-            .last_data_at_ms = std.time.milliTimestamp(),
+            .last_data_at_ms = os.milliTimestamp(),
             .passthrough_ctx = null,
             .passthrough_fn = null,
             .thread = null,
@@ -139,7 +141,7 @@ pub const Upstream = struct {
 
     /// バックグラウンドスレッド開始
     pub fn start(self: *Upstream) !void {
-        self.thread = try std.Thread.spawn(.{}, runLoop, .{self});
+        self.thread = try os.Thread.spawn(.{}, runLoop, .{self});
     }
 
     /// 終了通知 + join (呼び出し側スレッドをブロックする)
@@ -158,7 +160,7 @@ pub const Upstream = struct {
         self.lock.lock();
         defer self.lock.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = os.milliTimestamp();
         const cutoff = now - self.max_obs_age_ms;
 
         // フレッシュなエントリを数える
@@ -188,7 +190,7 @@ pub const Upstream = struct {
     pub fn millisSinceLastData(self: *Upstream) i64 {
         self.lock.lock();
         defer self.lock.unlock();
-        return std.time.milliTimestamp() - self.last_data_at_ms;
+        return os.milliTimestamp() - self.last_data_at_ms;
     }
 };
 
@@ -215,7 +217,7 @@ fn runLoop(self: *Upstream) void {
         });
         backoff_ms = 0;
         self.lock.lock();
-        self.last_data_at_ms = std.time.milliTimestamp();
+        self.last_data_at_ms = os.milliTimestamp();
         self.lock.unlock();
 
         // 受信ループ
@@ -239,34 +241,25 @@ fn sleepInterruptible(self: *Upstream, ms: u64) void {
     const tick: u64 = 100;
     while (remaining > 0 and self.active.load(.seq_cst)) {
         const this_sleep: u64 = @min(remaining, tick);
-        std.Thread.sleep(this_sleep * @as(u64, std.time.ns_per_ms));
+        os.sleep(this_sleep * @as(u64, std.time.ns_per_ms));
         remaining -= this_sleep;
     }
 }
 
-/// socket に SO_RCVTIMEO を設定する。secs == 0 で無効化。
-fn setRecvTimeout(stream: std.net.Stream, secs: u32) !void {
-    const tv = std.posix.timeval{
-        .sec = @intCast(secs),
-        .usec = 0,
-    };
-    const bytes = std.mem.asBytes(&tv);
-    try std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.RCVTIMEO,
-        bytes,
-    );
+/// socket に SO_RCVTIMEO を設定する。secs == 0 で無効化。backend 差は
+/// io.setRecvTimeoutMs が吸収する。
+fn setRecvTimeout(stream: io.Stream, secs: u32) void {
+    io.setRecvTimeoutMs(stream.handle, secs * 1000);
 }
 
 /// NTRIP caster に GET 接続 → ICY 200 OK 確認まで
-fn connect(self: *Upstream) !std.net.Stream {
-    const stream = try std.net.tcpConnectToHost(self.alloc, self.cfg.host, self.cfg.port);
+fn connect(self: *Upstream) !io.Stream {
+    const stream = try io.tcpConnectToHost(self.alloc, self.cfg.host, self.cfg.port);
     errdefer stream.close();
 
     // ICY 待ち中に上流が応答しないと無限ハングするので、接続フェーズだけ短い
     // read timeout を入れる (15 秒)。読み始めたら無音検出は data_timeout_ms に任せる。
-    setRecvTimeout(stream, 15) catch {};
+    setRecvTimeout(stream, 15);
 
     // GET リクエスト送信
     try sendGet(self, stream);
@@ -283,13 +276,13 @@ fn connect(self: *Upstream) !std.net.Stream {
     }
 
     // 読み込みフェーズに入ったら timeout を長めに (ストール検知は data_timeout_ms で別途)
-    setRecvTimeout(stream, @intCast(self.cfg.data_timeout_ms / 1000 + 5)) catch {};
+    setRecvTimeout(stream, @intCast(self.cfg.data_timeout_ms / 1000 + 5));
 
     return stream;
 }
 
 /// 合成 NMEA GGA を送信する (rtk2go の NMEA=1 マウントを「開ける」ための嘘 GGA)。
-fn sendGga(self: *Upstream, stream: std.net.Stream) !void {
+fn sendGga(self: *Upstream, stream: io.Stream) !void {
     var buf: [128]u8 = undefined;
     const sentence = formatGga(&buf, self.cfg.gga_lat_deg, self.cfg.gga_lon_deg) orelse return;
     try stream.writeAll(sentence);
@@ -333,7 +326,7 @@ fn formatGga(buf: []u8, lat_deg: f64, lon_deg: f64) ?[]const u8 {
     return buf[0..fbs.pos];
 }
 
-fn sendGet(self: *Upstream, stream: std.net.Stream) !void {
+fn sendGet(self: *Upstream, stream: io.Stream) !void {
     var req_buf: [768]u8 = undefined;
 
     if (self.cfg.user.len > 0) {
@@ -376,7 +369,7 @@ fn sendGet(self: *Upstream, stream: std.net.Stream) !void {
     }
 }
 
-fn waitIcy(stream: std.net.Stream) !void {
+fn waitIcy(stream: io.Stream) !void {
     var buf: [256]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
@@ -393,7 +386,7 @@ fn waitIcy(stream: std.net.Stream) !void {
 }
 
 /// 受信生バイトを取り込み、パススルー callback と RTCM3 パーサーに投入する。
-fn readLoop(self: *Upstream, stream: std.net.Stream) void {
+fn readLoop(self: *Upstream, stream: io.Stream) void {
     var read_buf: [4096]u8 = undefined;
     // RTCM3 パース用バッファ (チャンク跨ぎ対応)
     var parse_buf: [8192]u8 = undefined;
@@ -412,7 +405,7 @@ fn readLoop(self: *Upstream, stream: std.net.Stream) void {
 
         // 受信時刻更新
         self.lock.lock();
-        self.last_data_at_ms = std.time.milliTimestamp();
+        self.last_data_at_ms = os.milliTimestamp();
         self.lock.unlock();
 
         // RTCM3 パース用バッファに追記 (溢れたら先頭を破棄)
@@ -486,7 +479,7 @@ fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
             const obs = msm7.extractPhase(self.alloc, payload) catch return;
             defer self.alloc.free(obs);
 
-            const now = std.time.milliTimestamp();
+            const now = os.milliTimestamp();
             self.lock.lock();
             defer self.lock.unlock();
             for (obs) |o| {
@@ -499,7 +492,7 @@ fn handleFrame(self: *Upstream, msg_type: u16, payload: []const u8) void {
         1019 => {
             // GPS broadcast ephemeris (Phase 7-1)。同一 PRN は常に上書き。
             const eph = ephemeris.parseMsg1019(payload) orelse return;
-            const now = std.time.milliTimestamp();
+            const now = os.milliTimestamp();
             self.lock.lock();
             defer self.lock.unlock();
             self.eph_store.upsertGps(eph, now) catch return;

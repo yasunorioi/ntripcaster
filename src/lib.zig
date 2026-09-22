@@ -3,6 +3,7 @@
 
 pub const config = @import("config/parser.zig");
 pub const auth = @import("auth/basic.zig");
+pub const io = @import("io.zig");
 pub const log = @import("log.zig");
 pub const relay = @import("relay/engine.zig");
 pub const server = @import("server.zig");
@@ -43,6 +44,7 @@ pub const admin = struct {
 comptime {
     _ = config;
     _ = auth;
+    _ = io;
     _ = log;
     _ = relay;
     _ = server;

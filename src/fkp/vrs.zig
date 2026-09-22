@@ -20,6 +20,8 @@
 //!   非ブロッキングで読んで `$G[PNL]GGA,...` 行を切り出してパースする。
 
 const std = @import("std");
+const io = @import("../io.zig");
+const os = @import("../os.zig");
 const parser = @import("../config/parser.zig");
 const server = @import("../server.zig");
 const source_mod = @import("../ntrip/source.zig");
@@ -56,8 +58,8 @@ pub const VrsConfig = struct {
 /// 単一 VRS rover の状態。1 接続 = 1 VrsRover = 1 スレッド。
 pub const VrsRover = struct {
     id: u64,
-    stream: std.net.Stream,
-    peer_addr: std.net.Address,
+    stream: io.Stream,
+    peer_addr: io.Address,
     started_at_ms: i64,
     alloc: std.mem.Allocator,
 
@@ -68,7 +70,7 @@ pub const VrsRover = struct {
 
     /// 最新の GGA から得た rover 位置 [deg, deg, m]
     /// has_position == false のあいだは合成停止 (= rover にデータ流さない)
-    lock: std.Thread.Mutex = .{},
+    lock: os.Mutex = .{},
     has_position: bool = false,
     lat_deg: f64 = 0.0,
     lon_deg: f64 = 0.0,
@@ -107,15 +109,15 @@ pub const VrsRover = struct {
     pub fn create(
         alloc: std.mem.Allocator,
         id: u64,
-        stream: std.net.Stream,
-        peer_addr: std.net.Address,
+        stream: io.Stream,
+        peer_addr: io.Address,
     ) !*VrsRover {
         const r = try alloc.create(VrsRover);
         r.* = .{
             .id = id,
             .stream = stream,
             .peer_addr = peer_addr,
-            .started_at_ms = std.time.milliTimestamp(),
+            .started_at_ms = os.milliTimestamp(),
             .alloc = alloc,
             .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)),
         };
@@ -145,7 +147,7 @@ pub const Runtime = struct {
     fkp_rt: ?*fkp_runtime.Runtime,
 
     /// 接続中の rover (id → VrsRover*)
-    rover_lock: std.Thread.Mutex = .{},
+    rover_lock: os.Mutex = .{},
     rovers: std.AutoHashMap(u64, *VrsRover),
 
     pub fn create(
@@ -240,8 +242,8 @@ pub const Runtime = struct {
     /// この関数の戻りでハンドラスレッドが終了する。
     pub fn handle(
         self: *Runtime,
-        stream: std.net.Stream,
-        peer_addr: std.net.Address,
+        stream: io.Stream,
+        peer_addr: io.Address,
     ) void {
         if (self.fkp_src == null) {
             stream.writeAll("HTTP/1.0 503 Service Unavailable\r\n\r\n") catch {};
@@ -275,7 +277,7 @@ pub const Runtime = struct {
                 rover.vrs_ref_id,
                 rover.bytes_in,
                 rover.bytes_out,
-                @divTrunc(std.time.milliTimestamp() - rover.started_at_ms, 1000),
+                @divTrunc(os.milliTimestamp() - rover.started_at_ms, 1000),
                 rover.frames_forwarded,
                 rover.frames_ref_id_rewritten,
                 rover.frames_dropped,
@@ -294,7 +296,7 @@ pub const Runtime = struct {
 
 // ── dispatch (server.VrsHandler 用) ───────────────────────────────────────
 
-fn dispatchHandle(ctx: *anyopaque, stream: std.net.Stream, peer: std.net.Address) void {
+fn dispatchHandle(ctx: *anyopaque, stream: io.Stream, peer: io.Address) void {
     const rt: *Runtime = @ptrCast(@alignCast(ctx));
     rt.handle(stream, peer);
 }
@@ -317,11 +319,11 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
     var parse_len: usize = 0;
 
     var last_1005_at_ms: i64 = 0;
-    var last_stats_at_ms: i64 = std.time.milliTimestamp();
+    var last_stats_at_ms: i64 = os.milliTimestamp();
     var last_stats_frames_fwd: u64 = 0;
     var last_stats_drop_1005: u64 = 0;
     var last_stats_drop_1006: u64 = 0;
-    const start_ms = std.time.milliTimestamp();
+    const start_ms = os.milliTimestamp();
 
     // rover stream 読み取り用の小バッファ + 1 行 (GGA) 切り出し用
     var gga_acc: [256]u8 = undefined;
@@ -329,7 +331,7 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
 
     // GGA を polling するため rover stream に短い read timeout を入れる。
     // upstream.zig と同じ手法 (SO_RCVTIMEO)。Linux では tv_usec = 100ms。
-    setRecvTimeoutMs(rover.stream, 100) catch {};
+    setRecvTimeoutMs(rover.stream, 100);
 
     while (fkp_src.active.load(.seq_cst)) {
         // 1) rover stream を polling して GGA を読みに行く
@@ -359,10 +361,10 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
             }
             parse_len = remaining;
         } else {
-            std.Thread.sleep(20 * std.time.ns_per_ms);
+            os.sleep(20 * std.time.ns_per_ms);
         }
 
-        const now = std.time.milliTimestamp();
+        const now = os.milliTimestamp();
 
         // 3) 定期的に Type 1005 を rover 座標で合成して送信
         rover.lock.lock();
@@ -428,18 +430,8 @@ fn runRoverLoop(rt: *Runtime, rover: *VrsRover) void {
 
 // ── GGA 読み取り ─────────────────────────────────────────────────────────
 
-fn setRecvTimeoutMs(stream: std.net.Stream, ms: u32) !void {
-    const tv = std.posix.timeval{
-        .sec = @intCast(ms / 1000),
-        .usec = @intCast((ms % 1000) * 1000),
-    };
-    const bytes = std.mem.asBytes(&tv);
-    try std.posix.setsockopt(
-        stream.handle,
-        std.posix.SOL.SOCKET,
-        std.posix.SO.RCVTIMEO,
-        bytes,
-    );
+fn setRecvTimeoutMs(stream: io.Stream, ms: u32) void {
+    io.setRecvTimeoutMs(stream.handle, ms);
 }
 
 /// rover stream から (短い timeout で) 1 回読み、改行で行をまとめて GGA を抽出する。
@@ -510,7 +502,7 @@ fn handleGgaLine(rt: ?*Runtime, rover: *VrsRover, line: []const u8) void {
     rover.lat_deg = final_lat;
     rover.lon_deg = final_lon;
     rover.alt_m = alt;
-    rover.last_gga_at_ms = std.time.milliTimestamp();
+    rover.last_gga_at_ms = os.milliTimestamp();
     const log_first = !rover.initial_gga_logged;
     rover.initial_gga_logged = true;
     rover.lock.unlock();
@@ -830,7 +822,7 @@ fn makeTestRover(alloc: std.mem.Allocator) VrsRover {
     return .{
         .id = id,
         .stream = .{ .handle = -1 }, // 触らない (forwardFiltered は writer 側を使う)
-        .peer_addr = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .peer_addr = io.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
         .started_at_ms = 0,
         .alloc = alloc,
         .vrs_ref_id = @truncate(0x800 | (id & 0x7FF)), // = 0x82A

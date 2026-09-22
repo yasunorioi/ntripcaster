@@ -13,6 +13,8 @@
 //! を受け取る。これでネットワーク RTK サービスとして機能する。
 
 const std = @import("std");
+const io = @import("../io.zig");
+const os = @import("../os.zig");
 const parser = @import("../config/parser.zig");
 const server = @import("../server.zig");
 const source_mod = @import("../ntrip/source.zig");
@@ -44,7 +46,7 @@ pub const FkpSnapshot = struct {
 /// `snapshot()` は caller 提供 allocator にコピーを返す。
 pub const FkpSnapshotStore = struct {
     alloc: std.mem.Allocator,
-    lock: std.Thread.Mutex = .{},
+    lock: os.Mutex = .{},
     params: ?[]engine.FkpParam = null,
     ref_coord: ?msm7.StationCoord = null,
 
@@ -107,7 +109,7 @@ pub const Runtime = struct {
 
     /// 制御用フラグ + 周期スレッド
     active: std.atomic.Value(bool),
-    thread: ?std.Thread,
+    thread: ?os.Thread,
 
     /// 主上流のパススルー callback コンテキスト (writeRawToVirtual から逆引きする)
     passthrough_ctx: PassthroughCtx,
@@ -154,7 +156,7 @@ pub const Runtime = struct {
         };
 
         // 仮想 Source を作って登録 (peer_addr はダミー 0.0.0.0:0)
-        const dummy_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+        const dummy_addr = io.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
         const virt = try source_mod.Source.create(alloc, mount_with_slash, dummy_addr);
         errdefer virt.destroy();
         virt.rtcm_detected = true; // 主上流の RTCM3 を流すので最初から true
@@ -218,7 +220,7 @@ pub const Runtime = struct {
         for (self.upstreams) |u| {
             try u.start();
         }
-        self.thread = try std.Thread.spawn(.{}, fkpLoop, .{self});
+        self.thread = try os.Thread.spawn(.{}, fkpLoop, .{self});
 
         self.state.logger.info(
             "FKP runtime started: mountpoint={s} sources={d} interval={d}s",
@@ -250,7 +252,7 @@ pub const Runtime = struct {
         // (source.zig handleSource() と同じパターン)
         var waited: u32 = 0;
         while (self.virtual_src.client_count.load(.seq_cst) > 0 and waited < 200) : (waited += 1) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            os.sleep(10 * std.time.ns_per_ms);
         }
         self.virtual_src.destroy();
 
@@ -290,7 +292,7 @@ fn writeToVirtual(rt: *Runtime, data: []const u8) void {
     }
     rt.virtual_src.msg_lock.lock();
     rt.virtual_src.bytes_in += data.len;
-    rt.virtual_src.last_data_at_ms = std.time.milliTimestamp();
+    rt.virtual_src.last_data_at_ms = os.milliTimestamp();
     rt.virtual_src.msg_lock.unlock();
 }
 
@@ -298,13 +300,13 @@ fn writeToVirtual(rt: *Runtime, data: []const u8) void {
 
 fn fkpLoop(rt: *Runtime) void {
     // 起動直後の小さな猶予 (上流接続が立ち上がる時間)
-    std.Thread.sleep(2 * std.time.ns_per_s);
+    os.sleep(2 * std.time.ns_per_s);
 
     const interval_ns = @as(u64, @intCast(rt.cfg.fkp_interval)) * std.time.ns_per_s;
 
     while (rt.active.load(.seq_cst)) {
         runOneFkpCycle(rt);
-        std.Thread.sleep(interval_ns);
+        os.sleep(interval_ns);
     }
 }
 
@@ -369,7 +371,7 @@ fn runOneFkpCycle(rt: *Runtime) void {
     }
 
     // Type59 エンコード
-    const tow_ms: u32 = @truncate(@as(u64, @intCast(std.time.timestamp())) % (7 * 24 * 3600) * 1000);
+    const tow_ms: u32 = @truncate(@as(u64, @intCast(os.timestamp())) % (7 * 24 * 3600) * 1000);
     const frame = type59.encodeType59(
         alloc,
         stations.items[0].coord.ref_station_id,

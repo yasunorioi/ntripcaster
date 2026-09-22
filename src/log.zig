@@ -4,6 +4,7 @@
 //! ファイル + stderr 二重出力、ログレベル(info/warn/err)、タイムスタンプ付き。
 
 const std = @import("std");
+const os = @import("os.zig");
 
 pub const Level = enum { info, warn, err };
 
@@ -13,7 +14,7 @@ pub const Logger = struct {
     file: ?std.fs.File = null,
     /// false にするとstderr出力を抑制する（テスト時に使用）。
     stderr: bool = true,
-    mutex: std.Thread.Mutex = .{},
+    mutex: os.Mutex = .{},
 
     /// ログレベルとメッセージを書き出す。
     pub fn log(self: *Logger, level: Level, comptime fmt: []const u8, args: anytype) void {
@@ -24,7 +25,7 @@ pub const Logger = struct {
         };
 
         var buf: [4096]u8 = undefined;
-        const ts = std.time.timestamp();
+        const ts = os.timestamp();
 
         // タイムスタンプ + レベルのヘッダーを先頭に書く
         const header_slice = std.fmt.bufPrint(&buf, "[{d}] [{s}] ", .{ ts, prefix }) catch return;
@@ -35,8 +36,11 @@ pub const Logger = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.stderr) std.fs.File.stderr().writeAll(line) catch {};
-        if (self.file) |f| f.writeAll(line) catch {};
+        if (self.stderr) os.consoleWrite(line);
+        // ファイルログは posix build のみ (lwip base kit にファイルシステム無し)。
+        if (!os.use_lwip) {
+            if (self.file) |f| f.writeAll(line) catch {};
+        }
     }
 
     pub fn info(self: *Logger, comptime fmt: []const u8, args: anytype) void {
@@ -51,23 +55,30 @@ pub const Logger = struct {
         self.log(.err, fmt, args);
     }
 
-    /// ログファイルをオープンして追記モードにする。
+    /// ログファイルをオープンして追記モードにする。lwip build は非対応
+    /// (base kit にファイルシステム無し。将来 SD を積むならここを差し替え)。
     pub fn openFile(self: *Logger, path: []const u8) !void {
-        const f = try std.fs.cwd().createFile(path, .{ .truncate = false });
-        errdefer f.close();
-        try f.seekFromEnd(0);
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        self.file = f;
+        if (!os.use_lwip) {
+            const f = try std.fs.cwd().createFile(path, .{ .truncate = false });
+            errdefer f.close();
+            try f.seekFromEnd(0);
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.file = f;
+        } else {
+            return error.Unsupported;
+        }
     }
 
     /// ログファイルをクローズする。
     pub fn closeFile(self: *Logger) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.file) |f| {
-            f.close();
-            self.file = null;
+        if (!os.use_lwip) {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.file) |f| {
+                f.close();
+                self.file = null;
+            }
         }
     }
 };
