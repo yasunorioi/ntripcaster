@@ -61,7 +61,7 @@ pub const std_options: std.Options = .{
 
 fn casterLog(
     comptime level: std.log.Level,
-    comptime scope: @Type(.enum_literal),
+    comptime scope: @EnumLiteral(),
     comptime fmt: []const u8,
     args: anytype,
 ) void {

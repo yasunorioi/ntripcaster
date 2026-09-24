@@ -6,6 +6,31 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### ESP32-P4 (Tab5) lwip backend: @cImport → C シム化
+
+- **`io_lwip.zig` / `os_lwip.zig` から FreeRTOS/lwIP ヘッダの `@cImport` を撤廃**。
+  Zig 0.16 の translate-c は ESP-IDF newlib の `platform_include` が依存する
+  `#include_next <sys/reent.h>` を解決できない (translate-c は `-isystem` 間で
+  include_next を継続しない。同一 Zig の `zig cc` は解決するため、これは
+  translate-c 固有の制約)。最小再現: `-isystem A -isystem B` で A 内の
+  `#include_next` が B に落ちない。この結果、FreeRTOS/lwIP/newlib 系ヘッダの
+  `@cImport` はこのツールチェーンで一律失敗していた (0.15→0.16 移行で顕在化)。
+- **解決: プリミティブ型のみの C シムを IDF GCC 側に新設**
+  (`components/ntripcaster/caster_os.c` = FreeRTOS/esp_timer、`caster_net.c` =
+  lwIP ソケット)。Zig 側は既存の `extern fn caster_console_write` と同じく
+  `extern fn` 宣言だけを持ち、構造体レイアウトも定数も境界を跨がない
+  (fd=`c_int`、FreeRTOS ハンドル=`?*anyopaque`、IPv4=network-order `u32`、
+  port=host-order `u16`、timeout=`u32` ms)。translate-c を一切通さない。
+- **副次効果**: `caster-lib` のクロスコンパイルが自己完結化 (IDF include set の
+  受け渡し = `NTRIPCASTER_IDF_INCLUDES` 機構を build.zig / component CMakeLists
+  から削除)。`zig build caster-lib -Dio-backend=lwip -Dtarget=riscv32-freestanding`
+  が IDF ヘッダ無しで通り、シムシンボルは firmware リンク段で解決。
+- **0.16 追随の取りこぼし修正**: `embedded.zig` の `@Type(.enum_literal)` →
+  `@EnumLiteral()` (0.16 で記法変更)。host の `zig build caster-lib` すら通らな
+  かった。
+- **検証**: host `zig build` 240/240 pass、`caster-lib` の esp32p4 クロスビルド
+  成功、`idf.py build` (esp32p4) 成功 → `tab5-caster.bin` 生成・警告ゼロ。
+
 ### Zig 0.16 への移行 (std.Io interface)
 
 - **ビルド要件を Zig 0.15.x → 0.16.x に変更**。0.16 で `std.Thread.{Mutex,

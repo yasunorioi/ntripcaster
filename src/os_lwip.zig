@@ -3,10 +3,13 @@
 //! Compiled ONLY when `-Dio-backend=lwip` (os.zig imports it behind a
 //! comptime-false branch otherwise, so the host/posix build never parses it).
 //!
-//! Requires FreeRTOS headers on the include path — provided by the ESP-IDF
-//! build that compiles this Zig tree as a static library. Like io_lwip.zig this
-//! file is NOT verifiable with a plain host `zig build`; it is the embedded
-//! (Tab5) implementation and is exercised by `idf.py build`.
+//! This file does NOT @cImport freertos/*.h. Zig 0.16's translate-c cannot
+//! resolve ESP-IDF newlib's `#include_next <sys/reent.h>` layering (it does not
+//! continue an #include_next across -isystem dirs, though `zig cc` does), so
+//! translating FreeRTOS headers fails. Instead the primitives are implemented
+//! in a thin C shim (components/ntripcaster/caster_os.c) compiled by the IDF
+//! GCC toolchain, and declared here as `extern fn`. See caster_shim.h for the
+//! ABI contract. No FreeRTOS struct layouts or constants live on this side.
 //!
 //! Design notes:
 //!   - Mutex / ResetEvent are value types (`= .{}` at the call sites) so they
@@ -23,42 +26,54 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("freertos/FreeRTOS.h");
-    @cInclude("freertos/task.h");
-    @cInclude("freertos/semphr.h");
-    @cInclude("freertos/event_groups.h");
-    @cInclude("esp_timer.h");
-});
+// ── C shim (components/ntripcaster/caster_os.c) ──────────────────────────────
+// Opaque FreeRTOS handles cross as ?*anyopaque; we never inspect them.
+const Opaque = ?*anyopaque;
 
-/// Convert nanoseconds to whole FreeRTOS ticks, rounding up so a sub-tick sleep
-/// still yields for at least one tick.
-fn nsToTicks(ns: u64) c.TickType_t {
-    const ns_per_tick: u64 = 1_000_000_000 / c.configTICK_RATE_HZ;
-    const ticks = (ns + ns_per_tick - 1) / ns_per_tick;
-    return @intCast(ticks);
-}
+extern fn caster_time_us() i64;
+extern fn caster_sleep_ns(ns: u64) void;
+
+extern fn caster_mutex_create() Opaque;
+extern fn caster_mutex_lock(h: Opaque) void;
+extern fn caster_mutex_unlock(h: Opaque) void;
+
+extern fn caster_event_create() Opaque;
+extern fn caster_event_set(h: Opaque) void;
+extern fn caster_event_clear(h: Opaque) void;
+extern fn caster_event_wait(h: Opaque) void;
+
+extern fn caster_sem_binary_create() Opaque;
+extern fn caster_sem_give(h: Opaque) void;
+extern fn caster_sem_take_block(h: Opaque) void;
+extern fn caster_sem_delete(h: Opaque) void;
+
+extern fn caster_task_create(
+    entry: *const fn (?*anyopaque) callconv(.c) void,
+    arg: ?*anyopaque,
+    stack_bytes: c_uint,
+    prio: c_uint,
+) c_int;
+extern fn caster_task_delete_self() void;
 
 pub fn sleep(ns: u64) void {
-    const ticks = nsToTicks(ns);
-    c.vTaskDelay(if (ticks == 0) 1 else ticks);
+    caster_sleep_ns(ns);
 }
 
-// ── time (std.time.{milliTimestamp,timestamp} は posix clock_gettime に依存) ──
-// esp_timer は boot からの経過マイクロ秒 (monotonic)。caster は基本的に差分
-// (idle timeout / uptime) しか見ないので wall-clock epoch でなくても成立する。
+// ── time ─────────────────────────────────────────────────────────────────────
+// caster_time_us is esp_timer (monotonic microseconds since boot). The caster
+// only ever takes differences (idle timeout / uptime), so a boot-relative clock
+// suffices — no wall-clock epoch needed.
 
 pub fn milliTimestamp() i64 {
-    return @divTrunc(c.esp_timer_get_time(), 1000);
+    return @divTrunc(caster_time_us(), 1000);
 }
 
 pub fn timestamp() i64 {
-    return @divTrunc(c.esp_timer_get_time(), 1_000_000);
+    return @divTrunc(caster_time_us(), 1_000_000);
 }
 
 // ── console ──────────────────────────────────────────────────────────────────
-// Log output sink provided by the firmware (main/). Maps to the ESP-IDF console
-// (UART / USB-Serial-JTAG). Declared extern so this file needs no esp_log header.
+// Log output sink provided by the firmware (caster_glue.c → ESP-IDF console).
 extern fn caster_console_write(ptr: [*]const u8, len: usize) void;
 
 pub fn consoleWrite(bytes: []const u8) void {
@@ -68,19 +83,19 @@ pub fn consoleWrite(bytes: []const u8) void {
 // ── Mutex ────────────────────────────────────────────────────────────────────
 
 pub const Mutex = struct {
-    handle: c.SemaphoreHandle_t = null,
+    handle: Opaque = null,
 
-    fn ensure(self: *Mutex) c.SemaphoreHandle_t {
-        if (self.handle == null) self.handle = c.xSemaphoreCreateMutex();
-        return self.handle.?;
+    fn ensure(self: *Mutex) Opaque {
+        if (self.handle == null) self.handle = caster_mutex_create();
+        return self.handle;
     }
 
     pub fn lock(self: *Mutex) void {
-        _ = c.xSemaphoreTake(self.ensure(), c.portMAX_DELAY);
+        caster_mutex_lock(self.ensure());
     }
 
     pub fn unlock(self: *Mutex) void {
-        _ = c.xSemaphoreGive(self.ensure());
+        caster_mutex_unlock(self.ensure());
     }
 };
 
@@ -106,24 +121,23 @@ pub const RwLock = struct {
 // ── ResetEvent ───────────────────────────────────────────────────────────────
 
 pub const ResetEvent = struct {
-    group: c.EventGroupHandle_t = null,
-    const BIT: c.EventBits_t = 0x1;
+    group: Opaque = null,
 
-    fn ensure(self: *ResetEvent) c.EventGroupHandle_t {
-        if (self.group == null) self.group = c.xEventGroupCreate();
-        return self.group.?;
+    fn ensure(self: *ResetEvent) Opaque {
+        if (self.group == null) self.group = caster_event_create();
+        return self.group;
     }
 
     pub fn set(self: *ResetEvent) void {
-        _ = c.xEventGroupSetBits(self.ensure(), BIT);
+        caster_event_set(self.ensure());
     }
 
     pub fn reset(self: *ResetEvent) void {
-        _ = c.xEventGroupClearBits(self.ensure(), BIT);
+        caster_event_clear(self.ensure());
     }
 
     pub fn wait(self: *ResetEvent) void {
-        _ = c.xEventGroupWaitBits(self.ensure(), BIT, c.pdFALSE, c.pdTRUE, c.portMAX_DELAY);
+        caster_event_wait(self.ensure());
     }
 };
 
@@ -139,7 +153,7 @@ pub const SpawnConfig = struct {
 };
 
 pub const Thread = struct {
-    done: c.SemaphoreHandle_t = null,
+    done: Opaque = null,
 
     pub const SpawnError = error{SpawnFailed};
 
@@ -147,52 +161,41 @@ pub const Thread = struct {
         const Args = @TypeOf(args);
         const Closure = struct {
             args: Args,
-            done: c.SemaphoreHandle_t,
+            done: Opaque,
 
             fn entry(ctx: ?*anyopaque) callconv(.c) void {
                 const self: *@This() = @ptrCast(@alignCast(ctx.?));
                 @call(.auto, f, self.args);
-                _ = c.xSemaphoreGive(self.done);
-                c.vTaskDelete(null);
+                caster_sem_give(self.done);
+                caster_task_delete_self();
             }
         };
 
-        // Completion semaphore (dynamic — the static variant's macro doesn't
-        // translate cleanly). join() takes it; detach() leaves it (leaked with
+        // Completion semaphore. join() takes it; detach() leaves it (leaked with
         // the closure, which is fine for process-lifetime caster tasks).
-        const done = c.xSemaphoreCreateBinary();
+        const done = caster_sem_binary_create();
         if (done == null) return error.SpawnFailed;
 
         // Heap-box the closure (task outlives this frame).
         const closure = std.heap.c_allocator.create(Closure) catch {
-            c.vSemaphoreDelete(done);
+            caster_sem_delete(done);
             return error.SpawnFailed;
         };
         closure.* = .{ .args = args, .done = done };
 
-        var task: c.TaskHandle_t = null;
-        // NOTE: ESP-IDF's xTaskCreate takes the stack depth in BYTES (it
-        // deviates from vanilla FreeRTOS, where it is in StackType_t words).
-        // Pass cfg.stack_size straight through — do NOT divide by the word size.
-        const ok = c.xTaskCreate(
-            Closure.entry,
-            "caster",
-            @intCast(cfg.stack_size),
-            closure,
-            5, // priority: above IDLE, below the USB host task
-            &task,
-        );
-        if (ok != c.pdPASS) {
+        // priority 5: above IDLE, below the USB host task.
+        const ok = caster_task_create(&Closure.entry, closure, @intCast(cfg.stack_size), 5);
+        if (ok != 0) {
             std.heap.c_allocator.destroy(closure);
-            c.vSemaphoreDelete(done);
+            caster_sem_delete(done);
             return error.SpawnFailed;
         }
         return .{ .done = done };
     }
 
     pub fn join(self: Thread) void {
-        if (self.done) |sem| {
-            _ = c.xSemaphoreTake(sem, c.portMAX_DELAY);
+        if (self.done != null) {
+            caster_sem_take_block(self.done);
         }
     }
 

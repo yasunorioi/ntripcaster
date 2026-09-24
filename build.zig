@@ -44,7 +44,8 @@ pub fn build(b: *std.Build) void {
         b.option(bool, "vrs-inject-antenna", "Inject RTCM3 Type 1008 antenna descriptor for VRS rovers") orelse false,
     );
     // I/O backend 選択 (src/io.zig)。posix=host/Linux/クラウド、lwip=ESP-IDF(Tab5)。
-    // lwip backend は未実装 (io_lwip.zig TODO)。host ビルドは posix のまま。
+    // lwip backend は io_lwip.zig / os_lwip.zig が C シム (caster_net.c/caster_os.c)
+    // を extern fn 経由で叩く実装。host ビルドは posix のまま。
     const IoBackend = enum { posix, lwip };
     options_step.addOption(
         IoBackend,
@@ -169,19 +170,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "build_options", .module = options_mod },
         },
     });
-    // ESP-IDF component ビルドが FreeRTOS/lwip の include dir 群を
-    // `NTRIPCASTER_IDF_INCLUDES` (`;` 区切り) で渡してくる。io_lwip.zig /
-    // os_lwip.zig の @cImport がこれらを解決する。host ビルド (env 未設定)
-    // では素通り。
-    // 0.16: std.process.getEnvVarOwned は撤去。build script は b.graph.environ_map
-    // (パース済み EnvMap) から読む。
-    if (b.graph.environ_map.get("NTRIPCASTER_IDF_INCLUDES")) |inc| {
-        var it = std.mem.tokenizeScalar(u8, inc, ';');
-        while (it.next()) |dir| {
-            if (dir.len == 0) continue;
-            caster_mod.addSystemIncludePath(.{ .cwd_relative = dir });
-        }
-    }
+    // lwip backend は FreeRTOS/lwip ヘッダを @cImport せず、C シム
+    // (components/ntripcaster/caster_os.c / caster_net.c) を extern fn で叩くので、
+    // この lib のクロスコンパイルに IDF の include dir 群は一切不要。シムの
+    // シンボルは firmware リンク段で解決される。
 
     const caster_lib = b.addLibrary(.{
         .name = "ntripcaster",

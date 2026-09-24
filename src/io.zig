@@ -10,7 +10,8 @@
 //! だけを見るようにする。backend は build option `-Dio-backend` で選ぶ:
 //!
 //!   - posix (default): host / Linux / クラウド caster。std.net へ 1:1 委譲。
-//!   - lwip (TODO)    : ESP-IDF。io_lwip.zig が lwip_read/write/close で実装。
+//!   - lwip           : ESP-IDF。io_lwip.zig が C シム (caster_net.c) を
+//!                      extern fn 経由で叩いて実装。
 //!
 //! Stream に対して実際に呼ばれる surface は writeAll / read / close / handle の
 //! 4 つだけ (grep 実測)。listen / accept は backend 固有なので listener 側
@@ -320,13 +321,13 @@ pub fn shutdownHandle(handle: Handle) void {
 
 /// 送信タイムアウト (writeAll が詰まった client を drop)。ミリ秒精度。
 pub fn setSendTimeoutMs(handle: Handle, ms: u32) void {
-    if (use_lwip) return lwip.setSockTimeoutMs(handle, lwip.SO_SNDTIMEO, ms);
+    if (use_lwip) return lwip.setSendTimeoutMs(handle, ms);
     setPosixTimeoutMs(handle, std.posix.SO.SNDTIMEO, ms);
 }
 
 /// 受信タイムアウト (keep-alive アイドル上限 / GGA 待ち)。ミリ秒精度。
 pub fn setRecvTimeoutMs(handle: Handle, ms: u32) void {
-    if (use_lwip) return lwip.setSockTimeoutMs(handle, lwip.SO_RCVTIMEO, ms);
+    if (use_lwip) return lwip.setRecvTimeoutMs(handle, ms);
     setPosixTimeoutMs(handle, std.posix.SO.RCVTIMEO, ms);
 }
 
